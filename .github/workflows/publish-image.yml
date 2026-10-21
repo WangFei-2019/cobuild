@@ -1,0 +1,96 @@
+name: Publish CoBuild image
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Pages is the default release. Automatic GHCR tags require an explicit repository opt-in.
+    if: github.event_name == 'workflow_dispatch' || vars.COBUILD_PUBLISH_GHCR == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Verify release before publishing
+        run: |
+          npm install --global pnpm@11.25.0 --ignore-scripts
+          pnpm install --frozen-lockfile
+          node --test tests/*.test.mjs
+          node scripts/build.mjs
+          node scripts/package-release.mjs --out "$RUNNER_TEMP/cobuild-release"
+      - name: Set immutable image tag
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          image="ghcr.io/${REPOSITORY,,}"
+          echo "name=$image" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=$image:sha-$COMMIT" >> "$GITHUB_OUTPUT"
+          if [ "$REF_TYPE" = tag ]; then
+            [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || { echo 'Invalid release tag'; exit 1; }
+            version="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
+            [ "$REF_NAME" = "v$version" ] || { echo 'Tag must match package.json version'; exit 1; }
+            echo "version_tag=$image:$REF_NAME" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build verified image
+        env:
+          IMAGE: ${{ steps.image.outputs.sha_tag }}
+          SOURCE: https://github.com/${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        run: docker build --label "org.opencontainers.image.source=$SOURCE" --label "org.opencontainers.image.revision=$COMMIT" --tag "$IMAGE" "$RUNNER_TEMP/cobuild-release"
+      - name: Check container startup
+        env:
+          IMAGE: ${{ steps.image.outputs.sha_tag }}
+        run: |
+          trap 'docker rm -f cobuild-release-check >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name cobuild-release-check --env COBUILD_PUBLIC_URL=https://smoke.invalid "$IMAGE"
+          for attempt in $(seq 1 30); do
+            if docker exec cobuild-release-check node -e "fetch('http://127.0.0.1:4173/api/health').then(async r=>{const j=await r.json();process.exit(r.ok&&j.ok&&j.authRequired?0:1)}).catch(()=>process.exit(1))"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs cobuild-release-check
+          exit 1
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_ACTOR: ${{ github.actor }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_ACTOR" --password-stdin
+      - name: Push exact commit and optional version
+        env:
+          IMAGE: ${{ steps.image.outputs.sha_tag }}
+          VERSION_IMAGE: ${{ steps.image.outputs.version_tag }}
+        run: |
+          docker push "$IMAGE"
+          if [ -n "$VERSION_IMAGE" ]; then
+            docker tag "$IMAGE" "$VERSION_IMAGE"
+            docker push "$VERSION_IMAGE"
+          fi
+          {
+            echo '### Published image'
+            echo "$IMAGE"
+            docker inspect --format '{{join .RepoDigests "\n"}}' "$IMAGE"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io || true

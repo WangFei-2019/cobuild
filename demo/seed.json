@@ -1,0 +1,471 @@
+{
+  "schemaVersion": 1,
+  "revision": 1,
+  "defaultProjectId": "demo-product",
+  "currentPersonId": "person-demo",
+  "people": [
+    {
+      "id": "person-m0",
+      "name": "陈知",
+      "color": "#427b68",
+      "initial": "知",
+      "bio": "内置演示人物",
+      "accountLinked": false
+    },
+    {
+      "id": "person-m1",
+      "name": "林夏",
+      "color": "#b47e59",
+      "initial": "夏",
+      "bio": "内置演示人物",
+      "accountLinked": false
+    },
+    {
+      "id": "person-m2",
+      "name": "周予",
+      "color": "#7770a3",
+      "initial": "予",
+      "bio": "内置演示人物",
+      "accountLinked": false
+    },
+    {
+      "id": "person-m3",
+      "name": "许言",
+      "color": "#6387a2",
+      "initial": "言",
+      "bio": "内置演示人物",
+      "accountLinked": false
+    },
+    {
+      "id": "person-demo",
+      "name": "演示体验者",
+      "color": "#28577b",
+      "initial": "我",
+      "bio": "内置演示人物",
+      "accountLinked": true
+    }
+  ],
+  "bindings": {
+    "demo-product": {
+      "m0": {
+        "personId": "person-m0",
+        "accessRole": "member"
+      },
+      "m1": {
+        "personId": "person-m1",
+        "accessRole": "member"
+      },
+      "m2": {
+        "personId": "person-m2",
+        "accessRole": "member"
+      },
+      "m3": {
+        "personId": "person-m3",
+        "accessRole": "member"
+      },
+      "demo-self": {
+        "personId": "person-demo",
+        "accessRole": "admin"
+      }
+    },
+    "demo-release": {
+      "m0": {
+        "personId": "person-demo",
+        "accessRole": "admin"
+      },
+      "release-helper": {
+        "personId": "person-m2",
+        "accessRole": "member"
+      }
+    }
+  },
+  "projects": [
+    {
+      "schemaVersion": 1,
+      "revision": 1,
+      "project": {
+        "id": "demo-product",
+        "name": "共建助手 · 产品体验示例",
+        "description": "以下人物、任务和成果均为内置演示。试着更新进展、提交一份成果，再由演示体验者接收。",
+        "goal": "四个人用一周完成一版可体验的协作工具，并一起验证进展整理与成果交接。",
+        "deadline": "2026-10-27",
+        "stage": "原型验证",
+        "color": "#427b68"
+      },
+      "members": [
+        {
+          "id": "m0",
+          "name": "陈知",
+          "role": "项目发起人",
+          "color": "#427b68",
+          "initial": "知"
+        },
+        {
+          "id": "m1",
+          "name": "林夏",
+          "role": "产品与设计",
+          "color": "#b47e59",
+          "initial": "夏"
+        },
+        {
+          "id": "m2",
+          "name": "周予",
+          "role": "数据与接口",
+          "color": "#7770a3",
+          "initial": "予"
+        },
+        {
+          "id": "m3",
+          "name": "许言",
+          "role": "前端开发",
+          "color": "#6387a2",
+          "initial": "言"
+        },
+        {
+          "id": "demo-self",
+          "name": "演示体验者",
+          "role": "演示项目管理与交付",
+          "color": "#28577b",
+          "initial": "我"
+        }
+      ],
+      "tasks": [
+        {
+          "artifacts": [
+            {
+              "id": "a1",
+              "name": "首版范围与原型说明.md",
+              "url": "/samples/brief.md",
+              "note": "示例资料：页面结构与首版范围已整理。",
+              "createdAt": "2026-10-20T10:00:00.000Z"
+            }
+          ],
+          "blocker": "",
+          "updatedAt": "2026-10-20T10:00:00.000Z",
+          "acceptedAt": "2026-10-20T10:00:00.000Z",
+          "tags": [
+            "产品设计"
+          ],
+          "id": "t1",
+          "code": "CB-101",
+          "title": "确认首版范围与页面原型",
+          "description": "明确小团队的共建流程，交付总览、任务详情与交接页原型。",
+          "ownerId": "m1",
+          "reviewerId": "m0",
+          "due": "2026-10-21",
+          "status": "done",
+          "priority": "high",
+          "dependsOn": [],
+          "deliverable": "一份页面原型与明确的首版范围说明",
+          "milestoneId": "demo-scope"
+        },
+        {
+          "artifacts": [],
+          "blocker": "",
+          "updatedAt": "2026-10-20T10:00:00.000Z",
+          "acceptedAt": "",
+          "tags": [
+            "接口",
+            "关键依赖"
+          ],
+          "id": "t2",
+          "code": "CB-102",
+          "title": "定义任务接口与示例数据",
+          "description": "约定任务、成员、进展及交付物字段，给前端一份可以直接对接的样例。",
+          "ownerId": "demo-self",
+          "reviewerId": "demo-self",
+          "due": "2026-10-22",
+          "status": "doing",
+          "priority": "high",
+          "dependsOn": [
+            "t1"
+          ],
+          "deliverable": "接口说明 Markdown + 示例 JSON 数据",
+          "milestoneId": "demo-delivery"
+        },
+        {
+          "artifacts": [],
+          "blocker": "等待评审意见后确认交互细节",
+          "updatedAt": "2026-10-20T10:00:00.000Z",
+          "acceptedAt": "",
+          "tags": [
+            "前端开发"
+          ],
+          "id": "t3",
+          "code": "CB-103",
+          "title": "完成任务看板与详情交互",
+          "description": "做出可筛选的任务看板，支持成员更新进展、提交成果。",
+          "ownerId": "demo-self",
+          "reviewerId": "m1",
+          "due": "2026-10-24",
+          "status": "blocked",
+          "priority": "high",
+          "dependsOn": [
+            "t1"
+          ],
+          "deliverable": "可访问的演示链接与操作说明",
+          "milestoneId": "demo-delivery"
+        },
+        {
+          "artifacts": [],
+          "blocker": "",
+          "updatedAt": "2026-10-20T10:00:00.000Z",
+          "acceptedAt": "",
+          "tags": [
+            "核心体验"
+          ],
+          "id": "t4",
+          "code": "CB-104",
+          "title": "验证一句话整理进展",
+          "description": "用完成、部分完成、等待依赖等真实表达，检查整理后的状态是否准确。",
+          "ownerId": "demo-self",
+          "reviewerId": "demo-self",
+          "due": "2026-10-24",
+          "status": "todo",
+          "priority": "medium",
+          "dependsOn": [
+            "t1"
+          ],
+          "deliverable": "至少五条输入与预期结果对照",
+          "milestoneId": "demo-delivery"
+        },
+        {
+          "artifacts": [],
+          "blocker": "",
+          "updatedAt": "2026-10-20T10:00:00.000Z",
+          "acceptedAt": "",
+          "tags": [
+            "项目交付"
+          ],
+          "id": "t5",
+          "code": "CB-105",
+          "title": "准备演示录屏与讲解稿",
+          "description": "串起发起人、任务负责人、接收人三个视角，演示一项成果如何交接。",
+          "ownerId": "m1",
+          "reviewerId": "m0",
+          "due": "2026-10-26",
+          "status": "todo",
+          "priority": "medium",
+          "dependsOn": [
+            "t3",
+            "t4"
+          ],
+          "deliverable": "两分钟演示视频与配套讲解稿",
+          "milestoneId": "demo-delivery"
+        },
+        {
+          "artifacts": [
+            {
+              "id": "a2",
+              "name": "首轮体验问题清单.md",
+              "url": "/samples/feedback.md",
+              "note": "示例资料：三条体验问题，等待陈知确认交接。",
+              "createdAt": "2026-10-20T10:00:00.000Z"
+            }
+          ],
+          "blocker": "",
+          "updatedAt": "2026-10-20T10:00:00.000Z",
+          "acceptedAt": "",
+          "tags": [
+            "体验反馈"
+          ],
+          "id": "t6",
+          "code": "CB-106",
+          "title": "整理首轮体验问题清单",
+          "description": "记录试用流程中难以理解或需要反复确认的地方，交给发起人核对。",
+          "ownerId": "m2",
+          "reviewerId": "demo-self",
+          "due": "2026-10-25",
+          "status": "review",
+          "priority": "low",
+          "dependsOn": [
+            "t1"
+          ],
+          "deliverable": "包含问题、复现方式与建议的问题清单",
+          "milestoneId": "demo-delivery"
+        }
+      ],
+      "activities": [
+        {
+          "id": "e3",
+          "kind": "artifact",
+          "actorId": "m2",
+          "taskId": "t6",
+          "text": "提交了「首轮体验问题清单.md」，等待陈知接收。",
+          "createdAt": "2026-10-20T10:00:00.000Z"
+        },
+        {
+          "id": "e2",
+          "kind": "update",
+          "actorId": "m3",
+          "taskId": "t3",
+          "text": "看板布局已经完成，接口字段还没确认，先等周予的样例数据再联调。",
+          "createdAt": "2026-10-20T09:30:00.000Z"
+        },
+        {
+          "id": "e1",
+          "kind": "accept",
+          "actorId": "m0",
+          "taskId": "t1",
+          "text": "确认接收页面原型与首版范围说明。",
+          "createdAt": "2026-10-20T08:00:00.000Z"
+        }
+      ],
+      "decisions": [
+        {
+          "id": "d1",
+          "title": "先服务已有的小团队",
+          "detail": "首版围绕任务分工、成员进展和成果交接验证使用价值。",
+          "createdAt": "2026-10-20T10:00:00.000Z"
+        },
+        {
+          "id": "d2",
+          "title": "完成报告与交接确认分别记录",
+          "detail": "负责人提交成果后进入待交接，由约定接收人确认完成。",
+          "createdAt": "2026-10-20T10:00:00.000Z"
+        }
+      ],
+      "milestones": [
+        {
+          "id": "demo-scope",
+          "title": "首版范围",
+          "goal": "先把要交付的范围说清楚",
+          "due": "2026-10-21",
+          "acceptanceCriteria": "原型与范围说明可以核对",
+          "status": "open",
+          "createdAt": "2026-10-20T10:00:00Z",
+          "updatedAt": "2026-10-20T10:00:00Z",
+          "acceptedAt": "",
+          "acceptedBy": "",
+          "acceptanceNote": "",
+          "acceptanceFingerprint": "",
+          "acceptanceHistory": []
+        },
+        {
+          "id": "demo-delivery",
+          "title": "联调与体验",
+          "goal": "跑通提交成果和接收确认",
+          "due": "2026-10-27",
+          "acceptanceCriteria": "任务成果由约定接收人逐项确认",
+          "status": "open",
+          "createdAt": "2026-10-20T10:00:00Z",
+          "updatedAt": "2026-10-20T10:00:00Z",
+          "acceptedAt": "",
+          "acceptedBy": "",
+          "acceptanceNote": "",
+          "acceptanceFingerprint": "",
+          "acceptanceHistory": []
+        }
+      ]
+    },
+    {
+      "schemaVersion": 1,
+      "revision": 1,
+      "project": {
+        "id": "demo-release",
+        "name": "演示站发布 · 第二项目",
+        "description": "同一位演示体验者在第二个项目有独立分工。浏览器保存不会同步给其他访问者。",
+        "goal": "整理可访问的演示说明与反馈入口",
+        "deadline": "2026-10-28",
+        "stage": "发布准备",
+        "color": "#b47e59",
+        "createdAt": "2026-10-20T10:00:00Z"
+      },
+      "members": [
+        {
+          "id": "m0",
+          "name": "演示体验者",
+          "role": "发布负责人",
+          "color": "#28577b",
+          "initial": "我"
+        },
+        {
+          "id": "release-helper",
+          "name": "周予",
+          "role": "演示验证",
+          "color": "#7770a3",
+          "initial": "予"
+        }
+      ],
+      "tasks": [
+        {
+          "id": "demo-publish-guide",
+          "code": "CB-101",
+          "title": "补充演示体验说明",
+          "description": "说明静态演示能力和数据仅留在当前浏览器的边界。",
+          "ownerId": "m0",
+          "reviewerId": "m0",
+          "due": "2026-10-26",
+          "status": "todo",
+          "priority": "medium",
+          "dependsOn": [],
+          "milestoneId": "demo-release-phase",
+          "deliverable": "一份面向体验者的使用说明",
+          "artifacts": [],
+          "blocker": "",
+          "updatedAt": "2026-10-20T10:00:00Z",
+          "acceptedAt": "",
+          "tags": [
+            "发布"
+          ]
+        }
+      ],
+      "milestones": [
+        {
+          "id": "demo-release-phase",
+          "title": "演示可交付",
+          "goal": "访问者知道能体验什么",
+          "due": "2026-10-28",
+          "acceptanceCriteria": "使用说明包含静态演示边界",
+          "status": "open",
+          "createdAt": "2026-10-20T10:00:00Z",
+          "updatedAt": "2026-10-20T10:00:00Z",
+          "acceptedAt": "",
+          "acceptedBy": "",
+          "acceptanceNote": "",
+          "acceptanceFingerprint": "",
+          "acceptanceHistory": []
+        }
+      ],
+      "activities": [],
+      "decisions": []
+    }
+  ],
+  "files": {},
+  "samples": {
+    "/samples/brief.md": {
+      "name": "首版范围与原型说明.md",
+      "text": "# 内置演示资料\n\n这是一份合成示例，用来展示任务成果与验收流程。\n\n首版围绕项目分工、进展整理、成果提交和接收确认。"
+    },
+    "/samples/feedback.md": {
+      "name": "首轮体验问题清单.md",
+      "text": "# 内置演示反馈\n\n1. 交付约定应清楚可核对。\n2. 提交成果后由约定接收人确认。\n3. 静态演示数据只保存在当前浏览器。"
+    }
+  },
+  "dateOffsets": {
+    "demo-product": {
+      "deadline": 21,
+      "milestones": {
+        "demo-scope": -2,
+        "demo-delivery": 21
+      },
+      "tasks": {
+        "t1": -2,
+        "t2": 3,
+        "t3": -1,
+        "t4": 14,
+        "t5": 16,
+        "t6": 2
+      }
+    },
+    "demo-release": {
+      "deadline": 14,
+      "milestones": {
+        "demo-release-phase": 14
+      },
+      "tasks": {
+        "demo-publish-guide": 5
+      }
+    }
+  }
+}

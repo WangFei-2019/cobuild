@@ -1,0 +1,25 @@
+# Only these inputs may enter the Docker build context.
+**
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!*.mjs
+!src/
+!src/**
+!public/
+!public/index.html
+!public/samples/
+!public/samples/**
+!scripts/
+!scripts/start.mjs
+!scripts/build.mjs
+!scripts/licenses.mjs
+# Defence in depth for accidental local files inside source directories.
+**/.env
+**/.env.*
+**/.local
+**/.local/**
+**/.secrets
+**/.secrets/**
+**/node_modules
+**/node_modules/**

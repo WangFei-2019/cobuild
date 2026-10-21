@@ -1,0 +1,13 @@
+{
+  "description": "共建原型体验用接口样例，不是真实项目交付",
+  "endpoint": "GET /api/state",
+  "task": {
+    "id": "t2",
+    "title": "定义任务接口与示例数据",
+    "ownerId": "m2",
+    "reviewerId": "m3",
+    "status": "doing",
+    "deliverable": "接口说明 Markdown + 示例 JSON 数据"
+  },
+  "error": { "error": "错误说明" }
+}

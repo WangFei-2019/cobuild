@@ -1,0 +1,48 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      COBUILD_PUBLIC_URL: ${COBUILD_PUBLIC_URL:?请在.env中设置HTTPS公开地址}
+      COBUILD_DATA_DIR: /app/.local
+      COBUILD_SETUP_TOKEN_FILE: /run/secrets/setup_token
+      COBUILD_AI_API_KEY_FILE: /run/secrets/ai_api_key
+      COBUILD_AI_BASE_URL: ${COBUILD_AI_BASE_URL:-}
+      COBUILD_AI_MODEL: ${COBUILD_AI_MODEL:-}
+      COBUILD_AI_RESPONSE_FORMAT: ${COBUILD_AI_RESPONSE_FORMAT:-json_schema}
+      COBUILD_AI_TOKEN_PARAMETER: ${COBUILD_AI_TOKEN_PARAMETER:-max_completion_tokens}
+      COBUILD_AI_TIMEOUT_MS: ${COBUILD_AI_TIMEOUT_MS:-30000}
+      COBUILD_AI_MAX_TOKENS: ${COBUILD_AI_MAX_TOKENS:-6000}
+      COBUILD_AI_THINKING: ${COBUILD_AI_THINKING:-}
+    secrets:
+      - setup_token
+      - ai_api_key
+    volumes:
+      - cobuild_data:/app/.local
+    expose:
+      - "4173"
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      COBUILD_DOMAIN: ${COBUILD_DOMAIN:?请在.env中设置域名}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+secrets:
+  setup_token:
+    file: ./.secrets/setup_token
+  ai_api_key:
+    file: ./.secrets/ai_api_key
+volumes:
+  cobuild_data:
+  caddy_data:
+  caddy_config:

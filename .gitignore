@@ -1,0 +1,15 @@
+.local/
+*.log
+screenshots/
+node_modules/
+dist-pages/
+.sites-runtime/
+.env
+.env.*
+!.env.example
+.secrets/
+# Generated release integrity record; included in release artifacts, not source commits.
+RELEASE-MANIFEST.json
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

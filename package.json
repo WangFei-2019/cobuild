@@ -1,0 +1,29 @@
+{
+  "name": "cobuild",
+  "version": "0.2.0",
+  "private": true,
+  "packageManager": "pnpm@11.25.0",
+  "type": "module",
+  "description": "共建：项目协作、成员工作台与交付管理",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "build": "node scripts/build.mjs",
+    "build:pages": "node scripts/build-pages.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "preview:pages": "node scripts/preview-pages.mjs"
+  },
+  "dependencies": {
+    "@ant-design/icons": "^6.1.0",
+    "@noble/hashes": "2.4.0",
+    "antd": "^6.0.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
