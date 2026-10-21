@@ -145,7 +145,7 @@ test('默认真实鉴权：新部署零示例人员，设置只创建真实管�
   assert.equal((await anonymous('/api/auth/session')).data.setupRequired, true);
   for (const path of ['/api/workspace', '/api/state', '/api/people', '/api/dashboard']) assert.equal((await anonymous(path)).status, 401);
   assert.equal((await anonymous('/api/projects', { name: '匿名不能创建' })).status, 401);
-  assert.equal((await anonymous('/api/auth/register', { name: '无邀请不能注册', email: 'no-invite@example.test', password })).status, 404);
+  assert.equal((await anonymous('/api/auth/register', { name: '初始化前不能注册', email: 'no-invite@example.test', password })).status, 409);
   const setup = await admin('/api/auth/setup', { name: '真实部署管理员', email: 'owner@example.test', password });
   assert.equal(setup.status, 200); assert.equal(setup.data.user.workspaceRole, 'admin');
   const personId = setup.data.user.personId;

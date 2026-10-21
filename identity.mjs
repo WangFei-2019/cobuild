@@ -52,6 +52,7 @@ export function createIdentity(dataDir) {
     catch (error) { db.exec('ROLLBACK'); throw error; }
   };
   const accountCount = () => get('SELECT COUNT(*) AS count FROM accounts').count;
+  let registrationsInFlight = 0;
   function person(personId) {
     if (typeof personId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(personId)) throw new AppError('没有找到这个成员档案',404);
     const value = get('SELECT p.*,a.id AS accountId FROM people p LEFT JOIN accounts a ON a.personId=p.id WHERE p.id=?', personId);
@@ -86,12 +87,21 @@ export function createIdentity(dataDir) {
       status: value.status === 'pending' && value.expiresAt <= now() ? 'expired' : value.status, acceptedAt: value.acceptedAt || '',
       memberName: value.personId ? person(value.personId).name : '' };
   }
+  function assertClaimScope(personId, inviterId, projectId) {
+    const inviter = user(inviterId);
+    if (inviter?.workspaceRole === 'admin') return;
+    const projects = new Set([projectId, ...all('SELECT projectId FROM project_members WHERE personId=?', personId).map(link => link.projectId)]);
+    if (!inviter || [...projects].some(id => get('SELECT accessRole FROM project_members WHERE projectId=? AND personId=?', id, inviter.personId)?.accessRole !== 'admin')) {
+      throw new AppError('这份人员档案关联其他项目，请由有权管理所有关联项目的管理者或工作区管理员核对认领', 403);
+    }
+  }
   function claim(invitation, current, joinProject) {
     if (invitation.email && invitation.email !== current.email) throw new AppError('请使用邀请指定的邮箱接受', 403);
     let personId = current.personId;
     if (invitation.personId && invitation.personId !== personId) {
       const targetAccount = get('SELECT id FROM accounts WHERE personId=?', invitation.personId);
       if (targetAccount) throw new AppError('该成员档案已绑定其他账号', 409);
+      assertClaimScope(invitation.personId, invitation.createdBy, invitation.projectId);
       const overlap = get('SELECT 1 FROM project_members a JOIN project_members b ON a.projectId=b.projectId WHERE a.personId=? AND b.personId=? LIMIT 1', personId, invitation.personId);
       if (overlap) throw new AppError('当前账号已在相关项目中，不能认领另一成员档案', 409);
       run('UPDATE project_members SET personId=? WHERE personId=?', invitation.personId, personId);
@@ -118,18 +128,27 @@ export function createIdentity(dataDir) {
     return { salt, key: key.toString('hex') };
   }
   function rateKeys(ip, address) { return [[hash(`account:${ip}:${address}`), 5], [hash(`ip:${ip}`), 30]]; }
-  function checkRate(keys) {
+  function checkRate(keys, message = '登录尝试过多，请稍后再试') {
     for (const [key, limit] of keys) {
       const value = get('SELECT * FROM login_attempts WHERE key=?', key);
-      if (value && Date.now() - value.windowStart < 15 * 60000 && value.count >= limit) throw new AppError('登录尝试过多，请稍后再试', 429);
+      if (value && Date.now() - value.windowStart < 15 * 60000 && value.count >= limit) {
+        const error = new AppError(message, 429); error.retryAfter = Math.max(1, Math.ceil((value.windowStart + 15 * 60000 - Date.now()) / 1000)); throw error;
+      }
     }
   }
   function failed(keys) {
+    const reservations = [];
     for (const [key] of keys) {
       const value = get('SELECT * FROM login_attempts WHERE key=?', key);
       const fresh = !value || Date.now() - value.windowStart >= 15 * 60000;
-      run('INSERT INTO login_attempts VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET count=excluded.count,windowStart=excluded.windowStart', key, fresh ? 1 : value.count + 1, fresh ? Date.now() : value.windowStart);
+      const windowStart = fresh ? Date.now() : value.windowStart;
+      run('INSERT INTO login_attempts VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET count=excluded.count,windowStart=excluded.windowStart', key, fresh ? 1 : value.count + 1, windowStart);
+      reservations.push({ key, windowStart });
     }
+    return reservations;
+  }
+  function releaseSuccessfulAttempt(reservations) {
+    for (const { key, windowStart } of reservations) run('UPDATE login_attempts SET count=count-1 WHERE key=? AND windowStart=? AND count>0', key, windowStart);
   }
   return {
     close() { db.close(); }, revision() { return get("SELECT value FROM metadata WHERE key='revision'").value; },
@@ -176,30 +195,49 @@ export function createIdentity(dataDir) {
       const address = email(input.email), keys = rateKeys(ip, address);
       checkRate(keys);
       // Reserve the attempt before awaiting scrypt so concurrent requests cannot evade the limit.
-      failed(keys);
+      const reservations = failed(keys);
       if (typeof input.password !== 'string' || input.password.length > 256) throw new AppError('邮箱或密码不正确', 401);
       const account = get('SELECT * FROM accounts WHERE email=?', address);
       const salt = account?.passwordSalt || '0'.repeat(32);
       const supplied = await scrypt(input.password, salt, 64);
       const expected = Buffer.from(account?.passwordHash || '0'.repeat(128), 'hex');
       if (!account || !timingSafeEqual(supplied, expected)) throw new AppError('邮箱或密码不正确', 401);
-      run('DELETE FROM login_attempts WHERE key=?', keys[0][0]);
+      // Release only this successful request, never another request's failure or
+      // reservation. Proxies may put every legitimate user in the same IP bucket.
+      releaseSuccessfulAttempt(reservations);
       return session(account.id);
     },
-    async register(input, joinProject) {
+    async register(input, joinProject, ip = 'unknown') {
+      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['name','email','password','inviteToken'].includes(key))) throw new AppError('注册仅支持姓名、邮箱、密码与可选邀请令牌');
+      if (!accountCount()) throw new AppError('请先由部署者完成工作区管理员初始化，再注册个人账号', 409);
       const name = clean(input.name, '姓名', 40), address = email(input.email);
-      invitationByToken(input.inviteToken);
-      const fields = await passwordFields(input.password);
-      return transaction(() => {
-        const invitation = invitationByToken(input.inviteToken);
-        if (invitation.email && invitation.email !== address) throw new AppError('请使用邀请指定的邮箱注册', 403);
-        if (get('SELECT id FROM accounts WHERE email=?', address)) throw new AppError('该邮箱已注册，请登录后接受邀请', 409);
-        if (invitation.personId && get('SELECT id FROM accounts WHERE personId=?', invitation.personId)) throw new AppError('该成员档案已绑定账号', 409);
-        const personId = invitation.personId || newPerson(name), accountId = id('account');
-        run('INSERT INTO accounts VALUES(?,?,?,?,?,?,?)', accountId, address, personId, fields.salt, fields.key, 'member', now());
-        const accepted = claim(invitation, user(accountId), joinProject);
-        return { ...session(accountId), projectId: accepted.projectId };
-      });
+      password(input.password);
+      const invited = Object.hasOwn(input, 'inviteToken');
+      if (invited) invitationByToken(input.inviteToken);
+      const keys = [[hash(`signup:email:${address}`), 5], [hash(`signup:ip:${ip}`), 30]];
+      checkRate(keys, '注册请求过多，请稍后再试');
+      if (registrationsInFlight >= 4) { const error = new AppError('当前注册请求较多，请稍后重试', 429); error.retryAfter = 1; throw error; }
+      // Persist before scrypt so parallel requests and restarts cannot evade the
+      // window. Source addresses are socket peers; arbitrary forwarded headers
+      // never grant additional quota behind a shared reverse proxy.
+      failed(keys); registrationsInFlight += 1;
+      try {
+        const fields = await passwordFields(input.password);
+        return transaction(() => {
+          const invitation = invited ? invitationByToken(input.inviteToken) : null;
+          if (invitation?.email && invitation.email !== address) throw new AppError('请使用邀请指定的邮箱注册', 403);
+          if (get('SELECT id FROM accounts WHERE email=?', address)) throw new AppError('该邮箱已注册，请登录后继续', 409);
+          if (invitation?.personId) {
+            if (get('SELECT id FROM accounts WHERE personId=?', invitation.personId)) throw new AppError('该成员档案已绑定账号', 409);
+            assertClaimScope(invitation.personId, invitation.createdBy, invitation.projectId);
+          }
+          const personId = invitation?.personId || newPerson(name), accountId = id('account');
+          run('INSERT INTO accounts VALUES(?,?,?,?,?,?,?)', accountId, address, personId, fields.salt, fields.key, 'member', now());
+          const accepted = invitation ? claim(invitation, user(accountId), joinProject) : null;
+          if (!accepted) bump();
+          return { ...session(accountId), ...(accepted ? { projectId: accepted.projectId } : {}) };
+        });
+      } finally { registrationsInFlight -= 1; }
     },
     syncProject(state, bindings = new Map()) {
       transaction(() => {
@@ -236,6 +274,7 @@ export function createIdentity(dataDir) {
         if (address && targetAccount && targetAccount.email !== address) throw new AppError('邀请邮箱与指定账号不一致');
         targetPersonId = target.id;
       }
+      if (targetPersonId && !person(targetPersonId).accountLinked) assertClaimScope(targetPersonId, current.id, input.projectId);
       const token = randomBytes(32).toString('base64url');
       const invitation = { id: id('invitation'), projectId: input.projectId, memberId: member?.memberId || null, personId: targetPersonId, email: address,
         accessRole: role, createdAt: now(), expiresAt: new Date(Date.now() + 7 * 86400000).toISOString(), status: 'pending' };

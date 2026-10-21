@@ -104,7 +104,7 @@ export function restoreData({backupDir, output, offline = false} = {}) {
   } catch (error) { rmSync(target, {recursive:true, force:true}); throw error; }
 }
 
-if (process.argv[1] && realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url))) {
+if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url))) {
   try {
     const [command, ...args] = process.argv.slice(2), options = {};
     for (let i = 0; i < args.length; i++) {

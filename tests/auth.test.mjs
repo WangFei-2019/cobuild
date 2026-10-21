@@ -143,9 +143,12 @@ test('跨项目ACL覆盖文件/导出/规则分析与人员聚合，已有人员
   assert.equal((await outsider.get(fileURL)).status,404);
   assert.equal((await outsider.get(`/api/people/${joined.session.user.personId}`)).status,404);
   assert.deepEqual(Buffer.from(await (await author.get(fileURL)).arrayBuffer()),content);
-  const added = await admin.post('/api/project-members',{projectId:project.project.id,personId:joined.session.user.personId,role:'接口负责人'});
-  assert.equal(added.status,200);
-  const linked = (await added.json()).state.members.find(member=>member.personId===joined.session.user.personId);
+  assert.equal((await admin.post('/api/project-members',{projectId:project.project.id,personId:joined.session.user.personId,role:'接口负责人'})).status,403);
+  const invited = await admin.post('/api/invitations',{projectId:project.project.id,personId:joined.session.user.personId});
+  assert.equal(invited.status,201);
+  const accepted = await author.post('/api/invitations/accept',{token:new URL((await invited.json()).invitation.url).pathname.split('/').at(-1)});
+  assert.equal(accepted.status,200);
+  const linked = (await accepted.json()).state.members.find(member=>member.personId===joined.session.user.personId);
   assert.notEqual(linked.id,'m2');
   const person = await author.json(`/api/people/${joined.session.user.personId}`);
   assert.equal(person.projects.length,2);
@@ -209,8 +212,11 @@ test('工作区管理员以项目普通成员身份仍可规划和验收里程�
   const created = await owner.post('/api/projects',{name:'其他成员发起的项目',deadline:'2026-11-30'});
   assert.equal(created.status,201);
   const projectId = (await created.json()).state.project.id;
-  // The project owner explicitly adds the workspace administrator as a normal member.
-  const added = await owner.post('/api/project-members',{projectId,personId:session.user.personId,role:'项目协作者',accessRole:'member'});
+  // The workspace administrator accepts a normal-member invitation while
+  // retaining the separate, trusted workspace administration capability.
+  const invited = await owner.post('/api/invitations',{projectId,personId:session.user.personId,accessRole:'member'});
+  assert.equal(invited.status,201);
+  const added = await admin.post('/api/invitations/accept',{token:new URL((await invited.json()).invitation.url).pathname.split('/').at(-1)});
   assert.equal(added.status,200);
   await invite(owner,member,{projectId,email:'ordinary-member@example.com',name:'普通参与者'});
   const before = await admin.json(`/api/state?projectId=${projectId}`);

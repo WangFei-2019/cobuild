@@ -12,6 +12,7 @@ export function NewProjectModal({ownerName,onCreate,onClose,onDirty}) {
   async function submit(values) {setSaving(true);try{const ok=await onCreate({...values,members:[]});if(ok)onClose();}finally{setSaving(false);}}
   return <Modal open title="创建项目" width={700} onCancel={onClose} onOk={()=>form.submit()} confirmLoading={saving} okText={addPartners?(isDemo?'创建并添加伙伴':'创建并邀请伙伴'):'创建项目'} cancelText="取消" mask={{closable:!saving}} closable={!saving} cancelButtonProps={{disabled:saving}} styles={{body:{maxHeight:'72vh',overflowY:'auto',paddingRight:4}}}>
     <p className="modal-intro">先写清共同目标，创建后再安排伙伴与分工。</p>
+    {!isDemo&&<p className="modal-intro">访问范围：项目成员与工作区管理员。其他账号通过邀请加入。</p>}
     <div className="prj-starter-options" aria-label="项目起步方向">{Object.entries(starters).map(([key,item])=><button key={key} type="button" className={starter===key?'active':''} aria-pressed={starter===key} onClick={()=>setStarter(key)}><strong>{item.name}</strong><small>{item.note}</small></button>)}</div>
     <Form form={form} layout="vertical" onFinish={submit} onValuesChange={()=>onDirty?.(true)} initialValues={{name:'',description:'',goal:'',deadline:'',ownerRole:'项目发起人',color:PROJECT_COLORS[0],inviteAfterCreate:true}} className="modal-form">
       <Form.Item label="项目名称" name="name" rules={[{required:true,whitespace:true,message:'请填写项目名称'}]}><Input placeholder="例如：周末一起做个小工具" maxLength={100} autoFocus/></Form.Item>

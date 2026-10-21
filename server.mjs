@@ -14,7 +14,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const TYPES = {'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.md':'text/plain; charset=utf-8','.json':'application/json; charset=utf-8','.png':'image/png'};
 const COOKIE = 'cobuild_session';
 const localHost = /^(?:localhost|127\.0\.0\.1|\[::1\]|(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.[\d.]+)(?::\d+)?$/;
-const pagePath = /^\/(?:dashboard|projects(?:\/[A-Za-z0-9_-]+\/(?:overview|tasks|mine|members|milestones|deliverables|insights|activity|settings))?|people(?:\/[A-Za-z0-9_-]+)?|settings|login|setup|invite\/[A-Za-z0-9_-]{43})\/?$/;
+const pagePath = /^\/(?:dashboard|projects(?:\/[A-Za-z0-9_-]+\/(?:overview|tasks|mine|members|milestones|deliverables|insights|activity|settings))?|people(?:\/[A-Za-z0-9_-]+)?|settings|login|register|setup|invite\/[A-Za-z0-9_-]{43})\/?$/;
 const validRole = value => { const role = value ?? 'member'; if (!['admin','member','viewer'].includes(role)) throw new AppError('项目访问角色不正确'); return role; };
 const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const loopbackHost = hostname => ['localhost','[::1]','::1'].includes(hostname) || /^127(?:\.\d{1,3}){3}$/.test(hostname);
@@ -83,16 +83,18 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
     res.writeHead(status, {'Content-Type':type,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer', ...extra});
     res.end(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value));
   }
-  async function body(req) {
+  async function body(req, limit = 8 * 1024 * 1024) {
     if (!(req.headers['content-type'] || '').startsWith('application/json')) throw new AppError('请求需要使用 JSON 格式', 415);
+    const tooLarge = () => new AppError(limit < 8 * 1024 * 1024 ? '账号请求过大，请减少输入内容' : '请求过大，单文件请控制在 5MB 内', 413);
+    if (Number(req.headers['content-length']) > limit) throw tooLarge();
     let size = 0; const chunks = [];
-    for await (const chunk of req) { size += chunk.length; if (size > 8 * 1024 * 1024) throw new AppError('请求过大，单文件请控制在 5MB 内', 413); chunks.push(chunk); }
+    for await (const chunk of req) { size += chunk.length; if (size > limit) throw tooLarge(); chunks.push(chunk); }
     let input;
     try { input = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new AppError('JSON 内容无法解析'); }
     if (!plainObject(input)) throw new AppError('请求格式不正确');
     return input;
   }
-  const sessionView = user => ({ setupRequired:identity?.setupRequired() || false, setupTokenRequired:Boolean(identity?.setupRequired() && (remoteDeployment || setupToken)), user });
+  const sessionView = user => ({ setupRequired:identity?.setupRequired() || false, setupTokenRequired:Boolean(identity?.setupRequired() && (remoteDeployment || setupToken)), registrationEnabled:Boolean(identity && !identity.setupRequired()), user });
   const sessionCookie = (token, expired = false) => `${COOKIE}=${expired ? '' : token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${expired ? 0 : 604800}${secureCookie ? '; Secure' : ''}`;
   function cookieToken(req) {
     return (req.headers.cookie || '').split(';').map(value => value.trim()).find(value => value.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1) || '';
@@ -195,7 +197,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
     if (Object.keys(input).some(key => !allowed.includes(key))) throw new AppError('包含不支持的项目字段');
     const ownerId = input.ownerPersonId ?? user.personId;
     if (typeof ownerId !== 'string') throw new AppError('发起人档案不正确');
-    if (ownerId !== user.personId && user.workspaceRole !== 'admin') throw new AppError('请以自己的账号发起项目',403);
+    if (ownerId !== user.personId) throw new AppError('请以自己的账号发起项目',403);
     const owner = visiblePerson(ownerId,user);
     if (input.members !== undefined && !Array.isArray(input.members)) throw new AppError('初始成员格式不正确');
     const bindings = new Map([['m0',{personId:owner.id,accessRole:'admin'}]]), seen = new Set([owner.id]);
@@ -203,6 +205,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       if (!plainObject(member) || Object.keys(member).some(key => !['name','personId','role'].includes(key))) throw new AppError('初始成员格式不正确');
       if ('personId' in member) {
         const person = visiblePerson(member.personId,user);
+        if (person.accountLinked && person.id !== user.personId) throw new AppError('已有账号需要本人接受项目邀请后加入',403);
         if (seen.has(person.id)) throw new AppError('同一人员不能重复加入项目');
         seen.add(person.id); bindings.set(`m${index+1}`,{personId:person.id,accessRole:'member'});
         return {name:person.name,role:member.role};
@@ -240,7 +243,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       if (req.method === 'GET' && pathname === '/api/auth/session') return send(res,200,sessionView(currentUser));
       if (req.method === 'POST' && pathname.startsWith('/api/auth/')) {
         if (!identity) throw new AppError('测试兼容模式不提供账号接口',404);
-        const input = await body(req);
+        const input = await body(req,16 * 1024);
         if (pathname === '/api/auth/logout') { identity.logout(token); return send(res,200,sessionView(null),undefined,{'Set-Cookie':sessionCookie('',true)}); }
         let result;
         if (pathname === '/api/auth/setup') {
@@ -252,7 +255,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
           result = await identity.setup(input);
           ensureAdministratorMemberships(result.user);
         } else if (pathname === '/api/auth/login') result = await identity.login(input,req.socket.remoteAddress || 'unknown');
-        else if (pathname === '/api/auth/register') result = await identity.register(input,joinProject);
+        else if (pathname === '/api/auth/register') result = await identity.register(input,joinProject,req.socket.remoteAddress || 'unknown');
         else throw new AppError('没有这个接口',404);
         return send(res,200,{...sessionView(result.user),...(result.projectId ? {projectId:result.projectId} : {})},undefined,{'Set-Cookie':sessionCookie(result.token)});
       }
@@ -280,7 +283,8 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
         if (selectable.length) {
           access(selectable[0],currentUser,{manage:true});
           const visibleIds = new Set(peopleSummary(identity,visibleStates(currentUser),currentUser).map(person=>person.id));
-          people = identity.people().filter(person=>person.accountLinked || visibleIds.has(person.id));
+          people = identity.people().filter(person=>person.accountLinked || visibleIds.has(person.id)).map(person => visibleIds.has(person.id) ? person :
+            {id:person.id,name:person.name,color:person.color,initial:person.initial,accountLinked:person.accountLinked});
         } else people = peopleSummary(identity,visibleStates(currentUser),currentUser);
         return send(res,200,{revision:revision(),permissions:peoplePermissions(currentUser),people:people.map(person=>profileView(person,currentUser))});
       }
@@ -318,6 +322,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
         if (!identity) throw new AppError('请使用真实账号模式添加已有人员');
         const person = selectablePerson(input.personId,currentUser), role = validRole(input.accessRole);
         if (identity.membership(context.projectId,person.id)) throw new AppError('该人员已经是项目成员',409);
+        if (person.accountLinked) throw new AppError('已有账号需要本人接受项目邀请后加入',403);
         const action = actingInput({...input,type:'addMember',name:person.name,role:input.role},context);
         const next = applyAction(context.state,action,{manageProject:true,allowDuplicateNames:true});
         saveState(context.projectId,next,new Map([[next.members.at(-1).id,{personId:person.id,accessRole:role}]]));
@@ -412,7 +417,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
   return server;
 }
 
-if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
   const readArg = (flag,fallback) => args.includes(flag) ? args[args.indexOf(flag)+1] : fallback;
   const port = Number(readArg('--port',process.env.COBUILD_PORT || '4173'));

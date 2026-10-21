@@ -5,7 +5,7 @@ import {fileURLToPath} from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../dist-pages');
 if (!existsSync(resolve(root,'index.html'))) {
-  process.stderr.write('请先运行 pnpm build:pages，再打开演示预览。\n'); process.exit(1);
+  process.stderr.write('请先运行 pnpm build:pages，再打开 Pages 预览。\n'); process.exit(1);
 }
 const args = process.argv.slice(2);
 if (!(args.length === 0 || args.length === 2 && args[0] === '--port')) {
@@ -20,7 +20,7 @@ const server = http.createServer((req,res) => {
     res.writeHead(status, {'X-Content-Type-Options':'nosniff','Cache-Control':'no-store',...headers});
     res.end(req.method === 'HEAD' ? '' : value);
   };
-  if (!['GET','HEAD'].includes(req.method)) return send(405, 'Static demo only.', {Allow:'GET, HEAD'});
+  if (!['GET','HEAD'].includes(req.method)) return send(405, 'Static Pages only.', {Allow:'GET, HEAD'});
   try {
     const pathname = decodeURIComponent(new URL(req.url,'http://localhost').pathname);
     if (pathname === '/' || pathname === '/cobuild') return send(302,'',{Location:base});
@@ -35,5 +35,5 @@ const server = http.createServer((req,res) => {
   } catch { send(404,'Not found'); }
 });
 server.on('error', error => { process.stderr.write(error.code === 'EADDRINUSE' ? '端口已占用，请停止旧预览或使用 --port 指定其它端口。\n' : '无法启动本机演示预览。\n'); process.exitCode = 1; });
-server.listen(port,'127.0.0.1',()=>process.stdout.write(`共建 · GitHub Pages 演示预览\nLocal: http://127.0.0.1:${port}${base}\n仅提供静态文件；数据保存在浏览器，不运行账号、邀请或模型服务。\n`));
+server.listen(port,'127.0.0.1',()=>process.stdout.write(`共建 · 工作区入口与独立演示预览\nLocal: http://127.0.0.1:${port}${base}\n静态入口导航至正式服务；demo.html 为独立本地演示。此预览不运行账号后端。\n`));
 for (const signal of ['SIGINT','SIGTERM']) process.on(signal,()=>server.close());

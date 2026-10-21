@@ -3,7 +3,7 @@ import {App as AntApp,Avatar,Button,Card,Drawer,Dropdown,Empty,Input,Progress,Re
 import {AppstoreOutlined,DashboardOutlined,SearchOutlined,ArrowRightOutlined,CheckCircleOutlined,ClockCircleOutlined,FlagOutlined,MenuOutlined,EllipsisOutlined,LogoutOutlined,PlusOutlined,ProjectOutlined,SettingOutlined,TeamOutlined,UserOutlined} from '@ant-design/icons';
 import {api,isDemo,avatarInitial,dateLabel,safeColor,contrastColor,shanghaiDay} from './lib.js';
 import Dashboard from './dashboard.jsx';
-import {migrateLegacyURL,navigate,routeHref,routeURL,setNavigationGuard,useRoute} from './router.js';
+import {authHref,migrateLegacyURL,navigate,routeHref,routeURL,safeNextPath,setNavigationGuard,useRoute} from './router.js';
 import {Person,ReferencesModal} from './shared.jsx';
 import {NewProjectModal} from './project-components.jsx';
 import ProjectPage from './project-page.jsx';
@@ -13,17 +13,18 @@ export default function Application(){
  const {message,modal}=AntApp.useApp(),route=useRoute();
  const [session,setSession]=useState(null),[sessionError,setSessionError]=useState(null),[demoEpoch,setDemoEpoch]=useState(0);
  useEffect(()=>{window.scrollTo(0,0);},[route.kind,route.projectId,route.personId,route.tab]);
- useEffect(()=>{if(route.kind!=='project')document.title=`${({dashboard:'我的工作台',projects:'项目中心',people:'人员目录',person:'人员主页',settings:isDemo?'演示与存储说明':'工作区设置',login:'登录',setup:'首次设置',invite:'项目邀请','404':'页面不存在'})[route.kind]||'共建'} · 共建`;},[route.kind]);
+ useEffect(()=>{if(route.kind!=='project')document.title=`${({dashboard:'我的工作台',projects:'项目中心',people:'人员目录',person:'人员主页',settings:isDemo?'演示与存储说明':'工作区设置',login:'登录',register:'注册账号',setup:'首次设置',invite:'项目邀请','404':'页面不存在'})[route.kind]||'共建'} · 共建`;},[route.kind]);
  async function loadSession(){try{setSession(await api('/api/auth/session'));setSessionError(null);}catch(error){setSessionError(error);}}
  useEffect(()=>{loadSession();},[]);
- useEffect(()=>{if(!session||isDemo)return;if(session.setupRequired&&route.kind!=='setup')navigate('/setup',{replace:true});else if(!session.setupRequired&&!session.user&&!['login','invite'].includes(route.kind)){const url=routeURL();navigate(`/login?next=${encodeURIComponent(url.pathname+url.search)}`,{replace:true});}else if(session.user&&['login','setup'].includes(route.kind))navigate(route.next?.startsWith('/')&&!route.next.startsWith('//')?route.next:'/dashboard',{replace:true});},[session,route.kind]);
- async function logout(){try{await api('/api/auth/logout',{});setNavigationGuard(null);setSession({setupRequired:false,user:null});navigate(route.kind==='invite'?`/invite/${route.token}`:'/login',{replace:true});}catch(error){message.error(error.message);}}
+ useEffect(()=>{if(!session||isDemo)return;const url=routeURL(),authRoute=['login','register','setup'].includes(route.kind),next=safeNextPath(route.next,authRoute?'/dashboard':safeNextPath(url.pathname+url.search));if(session.setupRequired&&route.kind!=='setup')navigate(authHref('setup',next),{replace:true});else if(!session.setupRequired&&!session.user&&!['login','register','invite'].includes(route.kind))navigate(authHref('login',next),{replace:true});else if(session.user&&authRoute)navigate(next,{replace:true});},[session,route.kind,route.next,route.token]);
+ async function logout(){try{const result=await api('/api/auth/logout',{});setNavigationGuard(null);setSession(result);navigate(route.kind==='invite'?`/invite/${encodeURIComponent(route.token)}`:'/login',{replace:true});}catch(error){message.error(error.message);}}
  if(sessionError&&isDemo)return <Result status="warning" title="暂时无法读取本地演示" subTitle={sessionError.message} extra={<><Button onClick={loadSession}>重新读取</Button><Button danger onClick={()=>modal.confirm({title:'重置本地演示数据？',content:'此操作会清除当前浏览器中本演示的所有修改，并恢复初始示例。',okText:'确认重置',okButtonProps:{danger:true},onOk:async()=>{try{const result=await api('/api/demo/reset',{});setSession(result);setSessionError(null);navigate('/dashboard',{replace:true});setDemoEpoch(value=>value+1);}catch(err){message.error(err.message);throw err;}}})}>重置演示</Button></>}/>;
  if(sessionError)return <ResourceState error={sessionError} onRetry={loadSession}/>;
  if(!session)return <div className="initial-loading"><Spin/><span>{isDemo?'正在载入本地演示…':'正在验证账号…'}</span></div>;
- if(isDemo&&['setup','login','invite'].includes(route.kind))return <Result status="info" title="这是 GitHub Pages 本地演示" subTitle="演示不提供真实账号、邀请或异地同步。返回工作台即可体验项目、任务、里程碑与成果交接，修改保存在当前浏览器。" extra={<Button type="primary" onClick={()=>navigate('/dashboard',{replace:true})}>进入演示工作台</Button>}/>;
- if(route.kind==='setup')return <AuthPage mode="setup" session={session} onAuth={setSession}/>;
- if(route.kind==='login')return <AuthPage mode="login" session={session} next={route.next} onAuth={setSession}/>;
+ if(isDemo&&['setup','login','register','invite'].includes(route.kind))return <Result status="info" title="这是 GitHub Pages 本地演示" subTitle="演示不提供真实账号、注册、邀请或异地同步。返回工作台即可体验项目、任务、里程碑与成果交接，修改保存在当前浏览器。" extra={<Button type="primary" onClick={()=>navigate('/dashboard',{replace:true})}>进入演示工作台</Button>}/>;
+ if(route.kind==='setup')return <AuthPage key="setup" mode="setup" session={session} next={route.next} onAuth={setSession}/>;
+ if(route.kind==='login')return <AuthPage key="login" mode="login" session={session} next={route.next} onAuth={setSession}/>;
+ if(route.kind==='register')return <AuthPage key="register" mode="register" session={session} next={route.next} onAuth={setSession}/>;
  if(route.kind==='invite')return <InvitePage token={route.token} session={session} onAuth={setSession} onLogout={logout}/>;
  if(!session.user)return <div className="initial-loading"><Spin/></div>;
  return <Workspace key={demoEpoch} session={session} route={route} onLogout={logout} onSessionExpired={loadSession} onDemoReset={()=>setDemoEpoch(value=>value+1)}/>;

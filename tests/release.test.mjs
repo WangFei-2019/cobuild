@@ -71,6 +71,14 @@ test('release packaging and verification CLIs actually execute through a current
   assert.match(invalid.stderr,/用法/);
 });
 
+test('runtime and operations modules remain importable from stdin without executing their CLI',()=>{
+  const modules=['server.mjs','scripts/backup.mjs','scripts/package-release.mjs','scripts/verify-release.mjs'];
+  const source=modules.map(file=>'await import('+JSON.stringify(new URL('../'+file,import.meta.url).href)+');').join('\n')+'\nconsole.log("modules-imported");';
+  const result=spawnSync(process.execPath,['--input-type=module','-'],{input:source,encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr);
+  assert.equal(result.stdout.trim(),'modules-imported');
+});
+
 test('packager refuses overwrites, nested paths, symlinked files and recognisable credentials',t=>{
   const {source,output,base} = fixture(t);
   assert.throws(()=>packageRelease({source,output:source}),/之外/);

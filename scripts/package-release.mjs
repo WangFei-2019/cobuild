@@ -52,7 +52,7 @@ export function packageRelease({source = sourceRoot, output, archive} = {}) {
   return {directory:target, archive:archivePath, files:files.length, version:meta.version};
 }
 
-if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const options = {};
     const args = process.argv.slice(2);

@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   publish:
-    # Pages is the default release. Automatic GHCR tags require an explicit repository opt-in.
+    # Automatic GHCR publishing requires an explicit repository opt-in.
     if: github.event_name == 'workflow_dispatch' || vars.COBUILD_PUBLISH_GHCR == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
