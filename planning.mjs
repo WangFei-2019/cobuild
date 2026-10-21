@@ -12,6 +12,10 @@ const stamp = () => new Date().toISOString();
 const uid = prefix => prefix + '-' + randomUUID();
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 
+export function taskHasConfirmedHandoff(task) {
+  return Boolean(task && task.status === 'done' && task.acceptedAt && task.artifacts?.length && !task.needsResubmission);
+}
+
 function object(value, label, allowed, required = []) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError(label + '必须是对象');
   if (allowed && Object.keys(value).some(key => !allowed.includes(key))) throw new AppError(label + '包含不支持的字段');
@@ -246,7 +250,7 @@ export function applyMilestoneAction(state, input) {
     const note = text(input.note, '里程碑验收说明', 2000);
     if (milestone.status === 'accepted') throw new AppError('这个里程碑已经验收', 409);
     const tasks = next.tasks.filter(item => item.milestoneId === milestone.id);
-    if (!tasks.length || tasks.some(item => item.status !== 'done' || !item.acceptedAt || !item.artifacts?.length || item.needsResubmission)) throw new AppError('至少关联一项任务，且全部任务均由接收人确认交接后，才能验收里程碑', 409);
+    if (!tasks.length || tasks.some(item => !taskHasConfirmedHandoff(item))) throw new AppError('至少关联一项任务，且全部任务均由接收人确认交接后，才能验收里程碑', 409);
     assignTasks(next, milestone, tasks.map(item => item.id), at);
     milestone.status = 'accepted'; milestone.acceptedAt = at; milestone.acceptedBy = input.actorId;
     milestone.acceptanceNote = note; milestone.acceptanceFingerprint = milestoneFingerprint(next, milestone); milestone.updatedAt = at;

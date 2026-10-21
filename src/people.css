@@ -17,3 +17,11 @@
 .project-members-grid .project-member-card-heading{align-items:flex-start}
 .people-directory .directory-no-project{line-height:1.75}
 @media(max-width:760px){.person-profile-actions{margin-left:0}.people-directory .center-heading>.ant-space{width:100%}.people-directory .center-heading>.ant-space .ant-btn{font-size:13px}.people-directory-explanation{margin-top:0}}
+
+.people-count-note{color:#7b847f;font-size:12px;line-height:1.75;margin:-10px 0 18px}
+.directory-summary-scope{color:#8a928f;font-size:11px;line-height:1.6;margin-top:18px}
+.directory-summary-scope+.directory-person-footer{margin-top:7px;padding-top:11px}
+.personal-page .profile-summary-inline{display:grid;grid-template-columns:repeat(3,minmax(0,auto));gap:7px 20px}
+.profile-summary-inline>.profile-summary-scope{grid-column:1/-1;text-align:left;font-size:11px;color:#8a928f}
+.profile-count-note{margin:10px 0 0;text-align:right}
+@media(max-width:760px){.profile-count-note{text-align:left}.personal-page .profile-summary-inline{column-gap:14px}}

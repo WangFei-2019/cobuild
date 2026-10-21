@@ -1,7 +1,7 @@
 import React,{useEffect,useRef,useState} from 'react';
-import {App as AntApp,Alert,Button,Card,ColorPicker,Dropdown,Empty,Form,Input,Modal,Select,Space,Table,Tabs,Tag,Typography} from 'antd';
+import {App as AntApp,Alert,Avatar,Button,Card,ColorPicker,Dropdown,Empty,Form,Input,Modal,Select,Space,Table,Tabs,Tag,Typography} from 'antd';
 import {ArrowRightOutlined,CopyOutlined,EditOutlined,EllipsisOutlined,LinkOutlined,PlusOutlined,SearchOutlined,TeamOutlined,UserAddOutlined} from '@ant-design/icons';
-import {api,isDemo,canManage,dateLabel} from './lib.js';
+import {api,isDemo,canManage,dateLabel,safeColor,contrastColor,avatarInitial} from './lib.js';
 import {navigate} from './router.js';
 import {Person} from './shared.jsx';
 import './people.css';
@@ -10,6 +10,18 @@ const {Text}=Typography;
 const accessOptions=[{value:'admin',label:'项目管理员'},{value:'member',label:'项目成员'},{value:'viewer',label:'只读成员'}];
 const colors=['#28577b','#427b68','#7770a3','#b47e59','#9a5d75','#6387a2'];
 const normalizedName=value=>String(value||'').trim().normalize('NFKC').toLocaleLowerCase();
+const briefBio=value=>{const chars=[...String(value||'').trim()];return chars.length>60?chars.slice(0,59).join('')+'…':chars.join('');};
+const shortPersonId=value=>typeof value==='string'&&/^[A-Za-z0-9_-]{9,}$/.test(value)?value.slice(-8):'';
+function PersonChoice({person,disambiguate=false}) {
+  const shortId=disambiguate?shortPersonId(person.id):'',bio=briefBio(person.bio);
+  return <Space align="start" size={10} style={{maxWidth:'100%'}}>
+    <Avatar size={30} style={{background:safeColor(person.color),color:contrastColor(person.color),flexShrink:0}}>{avatarInitial(person)}</Avatar>
+    <div style={{minWidth:0,whiteSpace:'normal',overflowWrap:'anywhere'}}>
+      <Space size={6} wrap><strong>{person.name}</strong><Text type="secondary">{person.accountLinked?(isDemo?'本地体验身份':'平台账号'):'人员档案'}</Text>{shortId&&<Text type="secondary">辨识码 · {shortId}</Text>}</Space>
+      <Text type="secondary" style={{display:'block'}}>{bio||'尚未填写人员简介'}</Text>
+    </div>
+  </Space>;
+}
 
 export function PersonProfileModal({person=null,revision,onClose,onSubmit}) {
   const {message,modal}=AntApp.useApp(),[form]=Form.useForm(),[saving,setSaving]=useState(false);
@@ -52,6 +64,12 @@ export function MemberManager({state,metadata,onSaved,onWorkspaceRefresh,compact
   const [people,setPeople]=useState([]),[invitations,setInvitations]=useState([]),[query,setQuery]=useState(''),[loadError,setLoadError]=useState(''),[directoryLoading,setDirectoryLoading]=useState(false);
   const manager=canManage(state),projectId=state.project.id,alive=useRef(true),loadSerial=useRef(0);
   const members=state.members.map(member=>({...metadata?.members?.find(item=>item.id===member.id),...member}));
+  const selectablePeople=people.filter(person=>!members.some(member=>member.personId===person.id));
+  const nameCounts=new Map();
+  for(const person of selectablePeople){const name=normalizedName(person.name);nameCounts.set(name,(nameCounts.get(name)||0)+1);}
+  const isSameName=person=>(nameCounts.get(normalizedName(person.name))||0)>1;
+  const personOptions=selectablePeople.map(person=>({value:person.id,person,sameName:isSameName(person),
+    label:person.name+(person.accountLinked?(isDemo?' · 本地体验身份':' · 平台账号'):' · 人员档案')+(isSameName(person)&&shortPersonId(person.id)?' · '+shortPersonId(person.id):'')}));
   const selectedPersonId=Form.useWatch('personId',form),selectedPerson=people.find(person=>person.id===selectedPersonId);
   const newPersonName=Form.useWatch('name',form);
   const matchingPeople=normalizedName(newPersonName)?people.filter(person=>normalizedName(person.name)===normalizedName(newPersonName)):[];
@@ -141,7 +159,7 @@ export function MemberManager({state,metadata,onSaved,onWorkspaceRefresh,compact
           {menuItems.length>0&&<Dropdown menu={{items:menuItems,onClick:({key})=>{if(key==='role')editRole(member);if(key==='invite')openInvite(member);}}}><Button type="text" size="small" icon={<EllipsisOutlined/>} aria-label={'管理'+member.name}/></Dropdown>}
         </Space></div>
         <div className="member-role-label">本项目负责方向</div><p className="member-role">{member.role||'尚未约定负责方向'}</p>
-        <div className="member-work-summary"><div><strong>{owned.length-done}</strong><span>待推进</span></div><div><strong>{done}</strong><span>已完成</span></div><div><strong>{reviewing}</strong><span>待接收</span></div></div>
+        <div className="member-work-summary"><div><strong>{owned.length-done}</strong><span>负责未完成</span></div><div><strong>{done}</strong><span>已完成</span></div><div><strong>{reviewing}</strong><span>待接收</span></div></div>
         <div className="member-card-footer"><span className={'person-account-state'+(member.accountLinked?' linked':'')}><i/>{isDemo?(member.accountLinked?'本地体验身份':'本地人员档案'):(member.accountLinked?'已关联平台账号':'未授予账号访问')}</span>
           {member.personId&&<Button type="text" size="small" icon={<ArrowRightOutlined/>} aria-label={'查看'+member.name+'的人员档案'} onClick={()=>navigate('/people/'+encodeURIComponent(member.personId))}/>}
         </div>
@@ -164,8 +182,9 @@ export function MemberManager({state,metadata,onSaved,onWorkspaceRefresh,compact
       {addingMode==='invite'?(isDemo?<div className="people-invite-unavailable"><LinkOutlined/><strong>演示版不生成真实邀请</strong><p>可以在前两个页签添加本地档案并模拟项目分工。账号注册、接受邀请和远程协作需运行完整服务端。</p><Button onClick={()=>setAddingMode('new')}>先创建本地档案</Button></div>:invitationForm(addInviteForm,true))
         :<Form form={form} disabled={saving} layout="vertical" onFinish={add} initialValues={{accessRole:'member'}}>
           {addingMode==='existing'?<>
-            <Form.Item name="personId" label="人员档案" rules={[{required:true,message:'请选择人员'}]}><Select showSearch loading={directoryLoading} optionFilterProp="label" placeholder="按姓名查找已有档案" options={people.filter(person=>!members.some(member=>member.personId===person.id)).map(person=>({value:person.id,label:person.name+(person.accountLinked?(isDemo?' · 本地体验身份':' · 平台账号'):' · 人员档案')}))}/></Form.Item>
-            {selectedAccount?<p className="person-form-explanation">这位人员已有平台账号。生成指定该账号的邀请，待对方接受后加入项目；不会立即授予访问。</p>:<Form.Item name="role" label="本项目负责方向" rules={[{required:true,whitespace:true,message:'请约定负责方向'}]}><Input maxLength={80} placeholder="例如：产品设计与用户研究"/></Form.Item>}
+            <Form.Item name="personId" label="人员档案" rules={[{required:true,message:'请选择人员'}]}><Select showSearch loading={directoryLoading} optionFilterProp="label" placeholder="按姓名查找已有档案" options={personOptions} virtual={false} optionRender={option=><PersonChoice person={option.data.person} disambiguate={option.data.sameName}/>}/></Form.Item>
+            {selectedPerson&&<Alert type="info" showIcon style={{marginBottom:18}} title={selectedAccount?'请核对受邀账号对应的人员':'已选择人员档案'} description={<><PersonChoice person={selectedPerson} disambiguate={isSameName(selectedPerson)}/>{selectedAccount&&<p style={{margin:'10px 0 0'}}>邀请只供这份档案绑定的账号接受；对方确认后才加入项目。请核对姓名、简介及同名辨识码。</p>}</>}/>}
+            {!selectedAccount&&<Form.Item name="role" label="本项目负责方向" rules={[{required:true,whitespace:true,message:'请约定负责方向'}]}><Input maxLength={80} placeholder="例如：产品设计与用户研究"/></Form.Item>}
             <Form.Item name="accessRole" label={selectedAccount?'接受邀请后的项目权限':isDemo?'本地模拟角色':'账号认领后的项目权限'}><Select options={accessOptions}/></Form.Item>
             {!selectedAccount&&<p className="person-form-footnote">{isDemo?'只调整当前浏览器中的分工，不产生真实账号或远程访问。':'加入档案不会开通账号访问；之后可以邀请本人认领，保留任务与成果。'}</p>}
           </>:<>
