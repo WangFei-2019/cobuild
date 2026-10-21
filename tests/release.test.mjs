@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import {mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {createHash} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 import {packageRelease} from '../scripts/package-release.mjs';
 import {verifyRelease} from '../scripts/verify-release.mjs';
 import {isReleaseFile, REQUIRED_RELEASE_FILES} from '../scripts/release-manifest.mjs';
@@ -68,4 +71,16 @@ test('packager refuses overwrites, nested paths, symlinked files and recognisabl
 test('release paths reject traversal, hidden state and env files while allowing checked-in examples',()=>{
   for (const path of ['../server.mjs','src/../.env','src/.private.js','public/.local/key','/server.mjs','.env','.env.production','.secrets/key','identity.sqlite','src\\main.jsx']) assert.equal(isReleaseFile(path),false,path);
   for (const path of ['.env.example','server.mjs','dashboard.mjs','src/main.jsx','scripts/doctor.mjs','.github/workflows/ci.yml']) assert.equal(isReleaseFile(path),true,path);
+});
+
+test('Pages entry uses relative asset URLs versioned by actual JS and CSS contents',()=>{
+  const root = fileURLToPath(new URL('../',import.meta.url));
+  const build = spawnSync(process.execPath,['scripts/build-pages.mjs'],{cwd:root,encoding:'utf8'});
+  assert.equal(build.status,0,build.stderr);
+  const html = readFileSync(join(root,'dist-pages/index.html'),'utf8');
+  for (const [extension,attribute] of [['js','src'],['css','href']]) {
+    const hash = createHash('sha256').update(readFileSync(join(root,'dist-pages/app.' + extension))).digest('hex').slice(0,12);
+    assert.ok(html.includes(attribute + '="./app.' + extension + '?v=' + hash + '"'),extension + ' URL must match its content digest');
+  }
+  assert.ok(!html.includes('src="/app.js"') && !html.includes('href="/app.css"'));
 });

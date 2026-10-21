@@ -2,6 +2,7 @@ import {build} from 'esbuild';
 import {cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {createHash} from 'node:crypto';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const output = join(root,'dist-pages');
@@ -33,9 +34,13 @@ const bundle = readFileSync(join(output,'app.js'),'utf8');
 // UI help may mention an environment variable by name; reject executable server reads.
 if (/process\.env(?:\.COBUILD_|\[['"]COBUILD_)|node:fs|node:sqlite/.test(bundle)) throw new Error('静态构建包含不应发布的服务器配置读取或 Node 模块');
 let html = readFileSync(join(root,'public/index.html'),'utf8');
-html = html.replace(/(href|src)="\/app\.(css|js)"/g,'$1="./app.$2"');
+const assetVersions = Object.fromEntries(['css','js'].map(extension => [
+  extension,
+  createHash('sha256').update(readFileSync(join(output,'app.' + extension))).digest('hex').slice(0,12),
+]));
+html = html.replace(/(href|src)="\/app\.(css|js)"/g,(_match,attribute,extension) => attribute + '="./app.' + extension + '?v=' + assetVersions[extension] + '"');
 html = html.replace('<title>共建 · 项目工作台</title>','<title>共建 · 交互演示</title>');
-if (!html.includes('src="./app.js"') || !html.includes('href="./app.css"')) throw new Error('演示入口必须使用相对资源路径');
+if (!html.includes('src="./app.js?v=' + assetVersions.js + '"') || !html.includes('href="./app.css?v=' + assetVersions.css + '"')) throw new Error('演示入口必须使用带内容版本的相对资源路径');
 writeFileSync(join(output,'index.html'),html);
 writeFileSync(join(output,'.nojekyll'),'');
 const samples = join(root,'public/samples');
