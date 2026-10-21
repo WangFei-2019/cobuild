@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { AppError, applyAction, analyzeUpdate, projectReport } from '../domain.mjs';
 import { applyPlanDraft, validatePlanDraft, applyMilestoneAction, reconcileMilestones, previewReplan, applyReplanDraft } from '../planning.mjs';
 import { dashboardSummary } from '../dashboard.mjs';
-import { peopleSummary, personDetails } from '../people.mjs';
+import { peopleSummary, personDetails, profileFields, checkProfileDuplicates, projectWithProfiles } from '../people.mjs';
 
 export const DEMO_STORAGE_KEY = 'cobuild.pages.demo.v1';
 export const DEMO_MODEL = '内置示例 · 非AI生成';
@@ -90,12 +90,13 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     if (typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(id)) throw new AppError('项目标识不正确');
     const state = doc.projects.find(value => value.project.id === id);
     if (!state) throw new AppError('没有找到这个演示项目', 404);
-    return state;
+    return projectWithProfiles(state,identity(doc));
   }
   const permissions = { manageProject: true, createTask: true, readOnly: false };
   function decorate(doc, state) {
     const adapter = identity(doc);
-    return { ...clone(state), demo: true, members: state.members.map(member => ({ ...clone(member), ...adapter.member(state.project.id, member.id) })),
+    const named = projectWithProfiles(state,adapter);
+    return { ...clone(named), demo: true, members: named.members.map(member => ({ ...clone(member), ...adapter.member(state.project.id, member.id) })),
       currentMemberId: adapter.membership(state.project.id, doc.currentPersonId)?.memberId || null, permissions: { ...permissions } };
   }
   function authorized(doc, state) {
@@ -108,7 +109,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
       permissions: { createProject: true, manageWorkspace: true }, projects: doc.projects.map(state => {
         const value = decorate(doc, state), p = state.project;
         return { ...clone(p), description: p.description || '', goal: p.goal || '', deadline: p.deadline || '', color: p.color || '#427b68',
-          ownerName: state.members.find(member => member.id === 'm0')?.name || '', memberCount: state.members.length,
+          ownerName: value.members.find(member => member.id === 'm0')?.name || '', memberCount: state.members.length,
           taskCount: state.tasks.length, doneCount: state.tasks.filter(task => task.status === 'done').length,
           blockedCount: state.tasks.filter(task => task.status === 'blocked').length, reviewCount: state.tasks.filter(task => task.status === 'review').length,
           permissions: { ...permissions }, members: value.members };
@@ -123,6 +124,11 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
   }
   function saveState(doc, next) {
     const clean = cleanState(next);
+    const previous = doc.projects.find(state=>state.project.id===clean.project.id);
+    for (const member of clean.members) {
+      const stored = previous.members.find(item=>item.id===member.id);
+      if (stored) for (const field of ['name','color','initial']) { if (Object.hasOwn(stored,field)) member[field]=stored[field]; else delete member[field]; }
+    }
     doc.projects[doc.projects.findIndex(state => state.project.id === clean.project.id)] = clean;
     doc.revision += 1; persist(doc); return decorate(doc, clean);
   }
@@ -165,6 +171,22 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
       members, tasks: [], decisions: [], milestones: [], activities: [{ id: `event-${randomUUID()}`, actorId, taskId: '', kind: 'create', text: '在本浏览器创建演示项目。', createdAt }] };
     doc.bindings[projectId] = bindings; doc.projects.push(state); doc.revision += 1; persist(doc);
     return { state: decorate(doc, state), workspace: workspace(doc) };
+  }
+  const peoplePermissions = {managePeople:true,createPerson:true,editProfile:true};
+  const profileView = person => ({...clone(person),permissions:{editProfile:true}});
+  const visibleStates = doc => doc.projects.map(state=>projectWithProfiles(state,identity(doc)));
+  function writePerson(doc,input,personId) {
+    const create = personId === undefined, allowed = create ? ['name','bio','color','allowDuplicateName'] : ['expectedRevision','patch','allowDuplicateName'];
+    if (Object.keys(input).some(key=>!allowed.includes(key))) throw new AppError('包含不支持的人员档案字段');
+    if (input.allowDuplicateName !== undefined && typeof input.allowDuplicateName !== 'boolean') throw new AppError('同名档案确认参数不正确');
+    if (!create && (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision!==doc.revision)) throw new AppError('人员目录已有更新，请刷新档案后重新保存',409);
+    const {allowDuplicateName=false,...fields}=input, previous = create ? null : identity(doc).person(personId);
+    const patch = profileFields(create ? fields : input.patch,{partial:!create});
+    checkProfileDuplicates(doc.people,create || patch.name!==previous.name ? patch.name : undefined,{excludingId:personId,allowDuplicateName});
+    const person = create ? {id:`person-${randomUUID()}`,...patch,accountLinked:false} : {...previous,...patch};
+    if (create) doc.people.push(person); else doc.people[doc.people.findIndex(value=>value.id===personId)]=person;
+    doc.revision+=1;persist(doc);
+    return {person:profileView(person),revision:doc.revision,permissions:{...peoplePermissions},session:session(doc)};
   }
   function samplePlan(doc, state, input, replan) {
     const goal = text(input.goal, '规划目标', 6000, true), ownMember = actor(doc, state, input).actorId;
@@ -217,9 +239,13 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
       if (path === '/api/auth/session') return session(doc);
       if (path === '/api/health') return { ok: true, demo: true, app: 'cobuild', authRequired: false };
       if (path === '/api/workspace') return workspace(doc);
-      if (path === '/api/dashboard') { const queries = url.searchParams.getAll('q'); if (queries.length > 1) throw new AppError('请只指定一个搜索内容'); return { demo: true, revision: doc.revision, ...dashboardSummary(adapter, doc.projects, current, { query: queries[0] || '', now: now() }) }; }
-      if (path === '/api/people') return { demo: true, revision: doc.revision, people: peopleSummary(adapter, doc.projects, current) };
-      if (/^\/api\/people\/[A-Za-z0-9_-]+$/.test(path)) return { demo: true, ...personDetails(adapter, doc.projects, current, path.split('/').at(-1)) };
+      if (path === '/api/dashboard') { const queries = url.searchParams.getAll('q'); if (queries.length > 1) throw new AppError('请只指定一个搜索内容'); return { demo: true, revision: doc.revision, ...dashboardSummary(adapter, visibleStates(doc), current, { query: queries[0] || '', now: now() }) }; }
+      if (path === '/api/people') {
+        const selected=url.searchParams.getAll('selectableForProject');if(selected.length>1)throw new AppError('请只指定一个项目');
+        if(selected.length)stateFor(doc,selected[0]);
+        return {demo:true,revision:doc.revision,permissions:{...peoplePermissions},people:(selected.length?adapter.people():peopleSummary(adapter,visibleStates(doc),current)).map(profileView)};
+      }
+      if (/^\/api\/people\/[A-Za-z0-9_-]+$/.test(path)) {const detail=personDetails(adapter,visibleStates(doc),current,path.split('/').at(-1));return {demo:true,...detail,person:profileView(detail.person),revision:doc.revision,permissions:{...peoplePermissions}};}
       if (path === '/api/ai/status') return { configured: false, demo: true, samplePlanning: true, provider: 'local-sample', model: DEMO_MODEL, baseUrl: '', fileLimit: FILE_LIMIT, filesLimit: FILES_LIMIT };
       if (path === '/api/state') return decorate(doc, stateFor(doc, projectId));
       if (path === '/api/export') return clone(stateFor(doc, projectId));
@@ -227,6 +253,8 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
       throw new AppError('演示接口不存在', 404);
     }
     if (path === '/api/auth/logout') return session(doc);
+    if (path === '/api/people') return writePerson(doc,input);
+    if (/^\/api\/people\/[A-Za-z0-9_-]+$/.test(path)) return writePerson(doc,input,path.split('/').at(-1));
     if (path === '/api/projects') return createProject(doc, input);
     const state = stateFor(doc, projectId), action = actor(doc, state, input);
     if (path === '/api/ai/plan' || path === '/api/ai/replan') return samplePlan(doc, state, input, path.endsWith('/replan'));
@@ -243,6 +271,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
       next = applyAction(state, { ...action, type: 'addMember', name: person.name, role: input.role }, { manageProject: true, allowDuplicateNames: true });
       doc.bindings[state.project.id][next.members.at(-1).id] = { personId: person.id, accessRole: role };
     } else if (path === '/api/action') {
+      if(action.type==='updateMember'&&!Number.isSafeInteger(action.expectedRevision))throw new AppError('请提供成员编辑所依据的项目版本');
       if (action.type === 'submitArtifact' && action.file) attachFile(doc, action);
       else { delete action.fileMeta; if (action.type === 'submitArtifact' && typeof action.url === 'string' && action.url.startsWith('/api/')) throw new AppError('请通过文件选择器提交本地演示附件'); }
       next = reconcileMilestones(applyAction(state, action, { manageProject: true }));

@@ -1,5 +1,47 @@
 import { AppError } from './domain.mjs';
 
+export function profileFields(input, { partial = false } = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['name', 'bio', 'color'].includes(key))) throw new AppError('人员档案仅支持姓名、简介和头像颜色');
+  if (partial && !Object.keys(input).length) throw new AppError('请提供需要修改的档案字段');
+  const result = {};
+  if (!partial || 'name' in input) {
+    if (typeof input.name !== 'string' || !input.name.trim() || input.name.length > 40) throw new AppError('姓名需要为1–40字');
+    result.name = input.name.trim(); result.initial = [...result.name].at(-1);
+  }
+  if (!partial || 'bio' in input) {
+    const bio = input.bio ?? '';
+    if (typeof bio !== 'string' || bio.length > 1000) throw new AppError('负责方向/简介最多1000字');
+    result.bio = bio.trim();
+  }
+  if (!partial || 'color' in input) {
+    const color = input.color ?? '#427b68';
+    if (typeof color !== 'string' || !/^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/i.test(color)) throw new AppError('头像颜色需要合法的十六进制颜色');
+    result.color = color;
+  }
+  return result;
+}
+
+export function checkProfileDuplicates(people, name, { excludingId, allowDuplicateName = false } = {}) {
+  if (typeof allowDuplicateName !== 'boolean') throw new AppError('同名档案确认参数不正确');
+  if (!name) return;
+  const normalized = value => value.normalize('NFKC').toLocaleLowerCase();
+  const matches = people.filter(person => person.id !== excludingId && normalized(person.name) === normalized(name));
+  if (matches.length && !allowDuplicateName) {
+    const error = new AppError('已有同名人员档案，请先选择已有人员；确认是不同的人后再允许创建同名档案。', 409);
+    error.code = 'DUPLICATE_PERSON_NAME'; throw error;
+  }
+}
+
+// Profiles are authoritative display data; historical project records stay intact.
+export function projectWithProfiles(state, identity) {
+  return { ...state, members: state.members.map(member => {
+    const link = identity.member(state.project.id, member.id);
+    if (!link) return { ...member };
+    const person = identity.person(link.personId);
+    return { ...member, name: person.name, color: person.color, initial: person.initial };
+  }) };
+}
+
 function projectInfo(state) {
   const p = state.project;
   return { id: p.id, name: p.name, color: p.color || state.members.find(member => member.id === 'm0')?.color || '#427b68',

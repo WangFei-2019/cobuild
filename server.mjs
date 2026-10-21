@@ -6,7 +6,7 @@ import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { applyAction, analyzeUpdate, projectReport, AppError } from './domain.mjs';
 import { createWorkspace } from './workspace.mjs';
 import { createIdentity } from './identity.mjs';
-import { peopleSummary, personDetails } from './people.mjs';
+import { peopleSummary, personDetails, projectWithProfiles } from './people.mjs';
 import { dashboardSummary } from './dashboard.mjs';
 import { aiStatus, generatePlan, applyPlanDraft, applyMilestoneAction, reconcileMilestones, generateReplan, previewReplan, applyReplanDraft } from './planning.mjs';
 
@@ -97,7 +97,10 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
     return (req.headers.cookie || '').split(';').map(value => value.trim()).find(value => value.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1) || '';
   }
   function canRead(state, user) { return user.workspaceRole === 'admin' || Boolean(identity.membership(state.project.id, user.personId)); }
-  function visibleStates(user) { return authRequired ? workspace.allStates().filter(state => canRead(state, user)) : workspace.allStates(); }
+  function visibleStates(user) { return authRequired ? workspace.allStates().filter(state => canRead(state, user)).map(state => projectWithProfiles(state,identity)) : workspace.allStates(); }
+  const peoplePermissions = user => ({managePeople:user?.workspaceRole === 'admin',createPerson:user?.workspaceRole === 'admin',editProfile:user?.workspaceRole === 'admin'});
+  const profileView = (person,user) => ({...person,permissions:{editProfile:user?.workspaceRole === 'admin'}});
+  function requirePeopleManager(user) { if (!identity || user?.workspaceRole !== 'admin') throw new AppError('请由工作区管理员维护统一人员档案',403); }
   function permissions(state, user) {
     const membership = identity.membership(state.project.id, user.personId);
     const manageProject = user.workspaceRole === 'admin' || membership?.accessRole === 'admin';
@@ -106,7 +109,8 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
   }
   function decoratedState(state, user) {
     if (!authRequired) return state;
-    return { ...state, members:state.members.map(member => ({...member, ...identity.member(state.project.id, member.id)})), currentMemberId:identity.membership(state.project.id,user.personId)?.memberId || null, permissions:permissions(state,user) };
+    const named = projectWithProfiles(state,identity);
+    return { ...named, members:named.members.map(member => ({...member, ...identity.member(state.project.id, member.id)})), currentMemberId:identity.membership(state.project.id,user.personId)?.memberId || null, permissions:permissions(state,user) };
   }
   function workspaceView(user) {
     if (!authRequired) return workspace.view();
@@ -114,7 +118,8 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
     value.revision = revision();
     value.currentPersonId = user.personId;
     value.permissions = { createProject:true, manageWorkspace:user.workspaceRole === 'admin' };
-    value.projects = value.projects.map(project => ({ ...project, permissions:permissions(workspace.state(project.id),user), members:project.members.map(member => ({...member,...identity.member(project.id,member.id)})) }));
+    value.projects = value.projects.map(project => { const named = projectWithProfiles(workspace.state(project.id),identity); return { ...project,
+      ownerName:named.members.find(member=>member.id==='m0')?.name || '', permissions:permissions(named,user), members:named.members.map(member => ({...member,...identity.member(project.id,member.id)})) }; });
     return value;
   }
   function access(requestedId, user, { manage = false, write = false } = {}) {
@@ -124,7 +129,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
     const p = permissions(state,user);
     if (manage && !p.manageProject) throw new AppError('请由项目管理者进行此操作',403);
     if (write && p.readOnly) throw new AppError('当前账号只有项目只读权限',403);
-    return { state, projectId:state.project.id, actorId:identity.membership(state.project.id,user.personId)?.memberId || null, permissions:p };
+    return { state:projectWithProfiles(state,identity), projectId:state.project.id, actorId:identity.membership(state.project.id,user.personId)?.memberId || null, permissions:p };
   }
   function actingInput(input, context) {
     if (!authRequired) return input;
@@ -138,7 +143,14 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       accessRole:member.id === context.actorId && context.permissions.manageProject ? 'admin' : identity.member(context.projectId,member.id)?.accessRole || 'viewer'})) };
   }
   function saveState(projectId,next,bindings) {
-    const clean = {...next,members:next.members.map(member => { const {personId,accountLinked,accessRole,...value} = member; return value; })};
+    const stored = workspace.state(projectId);
+    const clean = {...next,members:next.members.map(member => {
+      const {personId,accountLinked,accessRole,...value} = member, previous = stored.members.find(item=>item.id===member.id);
+      if (identity && previous) for (const field of ['name','color','initial']) {
+        if (Object.hasOwn(previous,field)) value[field]=previous[field]; else delete value[field];
+      }
+      return value;
+    })};
     workspace.save(projectId,clean);
     if (identity) identity.syncProject(clean,bindings);
     return clean;
@@ -171,6 +183,10 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
     const person = identity.person(personId);
     if (user.workspaceRole !== 'admin' && personId !== user.personId && !visibleStates(user).some(state => state.members.some(member => identity.member(state.project.id,member.id)?.personId === personId))) throw new AppError('没有找到这个成员档案',404);
     return person;
+  }
+  function selectablePerson(personId,user) {
+    const person = identity.person(personId);
+    return person.accountLinked || user.workspaceRole === 'admin' ? person : visiblePerson(personId,user);
   }
   function createProject(input,user) {
     if (!authRequired) return workspace.create(input);
@@ -256,8 +272,32 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
         if (queries.length > 1) throw new AppError('请只指定一个搜索内容');
         return send(res,200,{revision:revision(),...dashboardSummary(identity,visibleStates(currentUser),currentUser,{query:queries[0] || ''})});
       }
-      if (req.method === 'GET' && pathname === '/api/people') return send(res,200,{revision:revision(),people:peopleSummary(identity,visibleStates(currentUser),currentUser)});
-      if (req.method === 'GET' && /^\/api\/people\/[A-Za-z0-9_-]+$/.test(pathname)) return send(res,200,personDetails(identity,visibleStates(currentUser),currentUser,pathname.split('/').at(-1)));
+      if (req.method === 'GET' && pathname === '/api/people') {
+        const selectable = url.searchParams.getAll('selectableForProject');
+        if (selectable.length > 1) throw new AppError('请只指定一个项目');
+        let people;
+        if (selectable.length) {
+          access(selectable[0],currentUser,{manage:true});
+          const visibleIds = new Set(peopleSummary(identity,visibleStates(currentUser),currentUser).map(person=>person.id));
+          people = identity.people().filter(person=>person.accountLinked || visibleIds.has(person.id));
+        } else people = peopleSummary(identity,visibleStates(currentUser),currentUser);
+        return send(res,200,{revision:revision(),permissions:peoplePermissions(currentUser),people:people.map(person=>profileView(person,currentUser))});
+      }
+      if (req.method === 'GET' && /^\/api\/people\/[A-Za-z0-9_-]+$/.test(pathname)) {
+        const detail = personDetails(identity,visibleStates(currentUser),currentUser,pathname.split('/').at(-1));
+        return send(res,200,{...detail,person:profileView(detail.person,currentUser),revision:revision(),permissions:peoplePermissions(currentUser)});
+      }
+      if (req.method === 'POST' && (pathname === '/api/people' || /^\/api\/people\/[A-Za-z0-9_-]+$/.test(pathname))) {
+        requirePeopleManager(currentUser);
+        const input = await body(req), create = pathname === '/api/people';
+        const allowed = create ? ['name','bio','color','allowDuplicateName'] : ['expectedRevision','patch','allowDuplicateName'];
+        if (Object.keys(input).some(key=>!allowed.includes(key))) throw new AppError('包含不支持的人员档案字段');
+        if (input.allowDuplicateName !== undefined && typeof input.allowDuplicateName !== 'boolean') throw new AppError('同名档案确认参数不正确');
+        if (!create && (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision !== revision())) throw new AppError('人员目录已有更新，请刷新档案后重新保存',409);
+        const {allowDuplicateName=false,...fields} = input;
+        const person = create ? identity.createPerson(fields,{allowDuplicateName}) : identity.updatePerson(pathname.split('/').at(-1),input.patch,{allowDuplicateName});
+        return send(res,create?201:200,{person:profileView(person,currentUser),revision:revision(),permissions:peoplePermissions(currentUser),session:sessionView(identity.user(currentUser.id))});
+      }
       if (req.method === 'GET' && ['/api/state','/api/export','/api/report'].includes(pathname)) {
         const context = access(queryProjectId(),currentUser);
         if (pathname === '/api/state') return send(res,200,decoratedState(context.state,currentUser));
@@ -275,7 +315,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       if (req.method === 'POST' && pathname === '/api/project-members') {
         const input = await body(req), context = access(input.projectId,currentUser,{manage:true});
         if (!identity) throw new AppError('请使用真实账号模式添加已有人员');
-        const person = visiblePerson(input.personId,currentUser), role = validRole(input.accessRole);
+        const person = selectablePerson(input.personId,currentUser), role = validRole(input.accessRole);
         if (identity.membership(context.projectId,person.id)) throw new AppError('该人员已经是项目成员',409);
         const action = actingInput({...input,type:'addMember',name:person.name,role:input.role},context);
         const next = applyAction(context.state,action,{manageProject:true,allowDuplicateNames:true});
@@ -288,6 +328,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       }
       if (req.method === 'POST' && pathname === '/api/invitations') {
         const input = await body(req), context = access(input.projectId,currentUser,{manage:true});
+        if (input.personId) selectablePerson(input.personId,currentUser);
         const invitation = identity.invite({...input,projectId:context.projectId},currentUser);
         const {token:inviteToken,...value} = invitation;
         return send(res,201,{invitation:{...value,url:`${deployment?.origin || origin}/invite/${inviteToken}`}});
@@ -327,7 +368,8 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       }
       if (req.method === 'POST' && pathname === '/api/action') {
         const input = await body(req), context = access(input.projectId,currentUser,{write:true}), action = actingInput(input,context);
-        if (authRequired && ['addMember','updateProject'].includes(action.type) && !context.permissions.manageProject) throw new AppError('请由项目管理者进行此操作',403);
+        if (authRequired && ['addMember','updateMember','updateProject'].includes(action.type) && !context.permissions.manageProject) throw new AppError('请由项目管理者进行此操作',403);
+        if (action.type === 'updateMember' && !Number.isSafeInteger(action.expectedRevision)) throw new AppError('请提供成员编辑所依据的项目版本');
         let filePath;
         try {
           if (action.type === 'submitArtifact' && action.file) {
@@ -363,7 +405,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       const publicDir = resolve(ROOT,'public'), file = resolve(publicDir,relative);
       if (!file.startsWith(`${publicDir}/`) || !existsSync(file) || !statSync(file).isFile()) throw new AppError('页面或文件不存在',404);
       send(res,200,req.method === 'HEAD' ? '' : readFileSync(file),TYPES[extname(file)] || 'application/octet-stream',{'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});
-    } catch (error) { send(res,error.status || 500,{error:error.status ? error.message : '服务处理失败，请查看服务日志'},undefined,error.retryAfter ? {'Retry-After':String(error.retryAfter)} : {}); if (!error.status) process.stderr.write(`${error.stack}\n`); }
+    } catch (error) { send(res,error.status || 500,{error:error.status ? error.message : '服务处理失败，请查看服务日志',...(error.code==='DUPLICATE_PERSON_NAME'?{code:error.code}:{})},undefined,error.retryAfter ? {'Retry-After':String(error.retryAfter)} : {}); if (!error.status) process.stderr.write(`${error.stack}\n`); }
   });
   server.on('close',() => identity?.close());
   return server;

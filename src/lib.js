@@ -5,7 +5,8 @@ export const PRIORITY={high:'高',medium:'普通',low:'低'};
 export const PRIORITY_ORDER={high:0,medium:1,low:2};
 export const isDemo=typeof __COBUILD_DEMO__!=='undefined'&&__COBUILD_DEMO__;
 export function avatarInitial(person){const initial=String(person?.initial||'').trim();if(/^[\p{L}\p{N}]{1,2}$/u.test(initial))return initial;const fullName=String(person?.name||''),name=fullName.replace(/[（(][^）)]*[）)]/gu,'').trim();const characters=name.match(/[\p{L}\p{N}]/gu)||fullName.match(/[\p{L}\p{N}]/gu);return characters?.at(-1)?.toLocaleUpperCase()||'?';}
-export const safeColor=value=>/^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(value||'')?value:'#28577b';
+export const safeColor=value=>/^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/i.test(value||'')?value:'#28577b';
+export function contrastColor(value){const hex=safeColor(value).slice(1),full=hex.length<5?[...hex].map(char=>char+char).join(''):hex,alpha=full.length===8?parseInt(full.slice(6,8),16)/255:1;const rgb=[0,2,4].map(index=>parseInt(full.slice(index,index+2),16)/255*alpha+1-alpha).map(channel=>channel<=.04045?channel/12.92:((channel+.055)/1.055)**2.4);return rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722>.179?'#000000':'#ffffff';}
 export const canManage=state=>state?.permissions?.manageProject===true;
 export const canCreate=state=>canManage(state)||state?.permissions?.createTask===true;
 export function shanghaiDay(now=new Date()){const parts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(now).map(part=>[part.type,part.value]));return `${parts.year}-${parts.month}-${parts.day}`;}

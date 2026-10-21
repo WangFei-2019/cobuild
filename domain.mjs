@@ -252,14 +252,25 @@ export function applyAction(current, input, permissions = {}) {
       state.members.push({ id: id('member'), name, role: optional(input.role, 80) || '项目协作者', initial: [...name].at(-1), color: ['#427b68', '#b47e59', '#7770a3', '#6387a2'][state.members.length % 4] });
       activity(state, input.actorId, '', 'member', `添加团队成员${name}。`); break;
     }
+    case 'updateMember': {
+      if (!manageProject) throw new AppError('请由项目管理者维护成员负责方向',403);
+      const value = member(state,input.memberId);
+      if (input.accessRole !== undefined || input.name !== undefined || input.personId !== undefined) throw new AppError('项目成员编辑仅支持本项目负责方向');
+      value.role = required(input.role,'本项目负责方向',80);
+      activity(state,input.actorId,'','member',`更新${value.name}在本项目的负责方向。`); break;
+    }
     case 'updateProject': {
       if (!manageProject) throw new AppError('请由项目发起人或管理者修改项目约定', 403);
       const p = input.patch;
       if (!p || typeof p !== 'object' || Array.isArray(p)) throw new AppError('请提供需要修改的项目信息');
-      if (Object.keys(p).some(k => !['name', 'description', 'goal', 'deadline'].includes(k))) throw new AppError('包含不支持修改的项目字段');
+      if (Object.keys(p).some(k => !['name', 'description', 'goal', 'deadline', 'color'].includes(k))) throw new AppError('包含不支持修改的项目字段');
       if ('name' in p) state.project.name = required(p.name, '项目名称', 100);
       if ('description' in p) state.project.description = optional(p.description, 500);
       if ('goal' in p) state.project.goal = optional(p.goal, 1500);
+      if ('color' in p) {
+        if (typeof p.color !== 'string' || !/^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/i.test(p.color)) throw new AppError('项目颜色需要合法的十六进制颜色');
+        state.project.color = p.color;
+      }
       if ('deadline' in p) {
         const deadline = date(p.deadline);
         if (deadline && deadline !== state.project.deadline && (state.tasks.some(value => value.due && value.due > deadline)

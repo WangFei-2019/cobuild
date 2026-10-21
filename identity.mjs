@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { randomBytes, randomUUID, createHash, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { AppError } from './domain.mjs';
+import { profileFields, checkProfileDuplicates } from './people.mjs';
 
 const scrypt = promisify(scryptCallback);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -134,6 +135,23 @@ export function createIdentity(dataDir) {
     close() { db.close(); }, revision() { return get("SELECT value FROM metadata WHERE key='revision'").value; },
     setupRequired() { return accountCount() === 0; }, person,
     people() { return all('SELECT id FROM people').map(value => person(value.id)); },
+    createPerson(input, { allowDuplicateName = false } = {}) {
+      const fields = profileFields(input);
+      return transaction(() => {
+        checkProfileDuplicates(all('SELECT id,name FROM people'), fields.name, { allowDuplicateName });
+        const personId = newPerson(fields.name, fields.color, fields.initial);
+        run('UPDATE people SET bio=? WHERE id=?', fields.bio, personId); bump(); return person(personId);
+      });
+    },
+    updatePerson(personId, patch, { allowDuplicateName = false } = {}) {
+      const fields = profileFields(patch, { partial: true });
+      return transaction(() => {
+        const previous = person(personId), next = { ...previous, ...fields };
+        checkProfileDuplicates(all('SELECT id,name FROM people'), next.name === previous.name ? undefined : next.name, { excludingId: personId, allowDuplicateName });
+        run('UPDATE people SET name=?,bio=?,color=?,initial=? WHERE id=?', next.name, next.bio, next.color, next.initial, personId);
+        bump(); return person(personId);
+      });
+    },
     user,
     sessionUser(token) {
       if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
@@ -209,8 +227,17 @@ export function createIdentity(dataDir) {
         if (!member) throw new AppError('没有找到这个项目成员', 404);
         if (person(member.personId).accountLinked) throw new AppError('该成员已经绑定账号', 409);
       }
+      let targetPersonId = member?.personId || null;
+      if (input.personId !== undefined && input.personId !== null && input.personId !== '') {
+        const target = person(input.personId);
+        if (member && target.id !== member.personId) throw new AppError('邀请指定的成员和人员档案不一致');
+        if (!member && get('SELECT 1 FROM project_members WHERE projectId=? AND personId=?', input.projectId, target.id)) throw new AppError('该人员已经是项目成员', 409);
+        const targetAccount = get('SELECT email FROM accounts WHERE personId=?', target.id);
+        if (address && targetAccount && targetAccount.email !== address) throw new AppError('邀请邮箱与指定账号不一致');
+        targetPersonId = target.id;
+      }
       const token = randomBytes(32).toString('base64url');
-      const invitation = { id: id('invitation'), projectId: input.projectId, memberId: member?.memberId || null, personId: member?.personId || null, email: address,
+      const invitation = { id: id('invitation'), projectId: input.projectId, memberId: member?.memberId || null, personId: targetPersonId, email: address,
         accessRole: role, createdAt: now(), expiresAt: new Date(Date.now() + 7 * 86400000).toISOString(), status: 'pending' };
       run('INSERT INTO invitations(id,tokenHash,projectId,memberId,personId,email,accessRole,createdBy,createdAt,expiresAt,status) VALUES(?,?,?,?,?,?,?,?,?,?,?)', invitation.id, hash(token), invitation.projectId, invitation.memberId, invitation.personId, address, role, current.id, invitation.createdAt, invitation.expiresAt, 'pending');
       bump(); return { ...publicInvitation(invitation), token };
