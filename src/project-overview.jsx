@@ -1,0 +1,58 @@
+import React from 'react';
+import {Button, Empty, Progress, Tag} from 'antd';
+import {ArrowRightOutlined, CheckCircleOutlined, EditOutlined, FlagOutlined, PlusOutlined, TeamOutlined} from '@ant-design/icons';
+import {deriveProjectInsights} from '../insights.mjs';
+import {canCreate, canManage, dateLabel, safeColor} from './lib.js';
+import {ActivityList, Person, StatusTag} from './shared.jsx';
+
+export default function ProjectOverview({state, onOpen, onTab, onNewTask, onAddMember, onEdit, onPlan}) {
+  const insight = deriveProjectInsights(state);
+  const {counts, health} = insight;
+  const complete = counts.total ? Math.round(counts.verifiedDone / counts.total * 100) : 0;
+  const actionable = insight.suggestions.slice(0, 3);
+  const taskIds = [...new Set(insight.suggestions.map(item => item.taskId).filter(Boolean))];
+  const ordered = [...taskIds.map(id => state.tasks.find(task => task.id === id)), ...state.tasks.filter(task => task.status !== 'done')]
+    .filter((task, index, all) => task && all.findIndex(item => item?.id === task.id) === index).slice(0, 4);
+  const missing = !state.project.goal ? {title:'先让大家对结果有相同的理解', text:'写清楚这次准备交付什么、由谁确认，让后续分工有共同的依据。', action:'补充共同目标', run:onEdit}
+    : !state.milestones?.length ? {title:'给目标一个可以验收的阶段', text:'先约定第一个阶段的结果和检查标准，再把它拆成具体任务。', action:'制定第一个里程碑', run:() => onTab('milestones')}
+    : !state.tasks.length ? {title:'把第一个阶段落到一个人和一份成果', text:'创建一项有负责人、接收人和交付约定的任务，开始实际推进。', action:'建立第一项分工', run:onNewTask} : null;
+  return <div className="prj-overview">
+    <section className="prj-outcome">
+      <div className="prj-outcome-copy">
+        <span className="prj-eyebrow">共同目标 / OUTCOME</span>
+        <h2>{state.project.goal || '一个共同的目标，值得一起做好。'}</h2>
+        <p>{state.project.description || '补充项目背景，让伙伴知道为什么开始、准备解决什么问题。'}</p>
+        <div className="prj-outcome-actions"><Button icon={<EditOutlined/>} disabled={!canManage(state)} onClick={onEdit}>完善项目约定</Button><Button type="text" onClick={() => onTab('insights')}>打开项目副驾 <ArrowRightOutlined/></Button></div>
+      </div>
+      <div className="prj-result-score">
+        <div className="prj-health-line"><span className={`prj-health-dot ${health.status}`}/><strong>{health.label}</strong></div>
+        <div className="prj-result-number">{counts.verifiedDone}<span>/ {counts.total}</span></div>
+        <p>任务已有完整交接记录</p>
+        <Progress percent={complete} showInfo={false} strokeColor="#2f7c67" trailColor="#dce8e1"/>
+        <small>{counts.total ? '按任务数量计数，成果质量仍需人工检查。' : '建立任务后显示交付进度。'}</small>
+      </div>
+    </section>
+    {missing && <section className="prj-start-guide"><span className="prj-guide-icon"><FlagOutlined/></span><div><h3>{missing.title}</h3><p>{missing.text}</p></div><Button type="primary" disabled={!canManage(state)} onClick={missing.run}>{missing.action} <ArrowRightOutlined/></Button></section>}
+    <div className="prj-overview-columns">
+      <div className="prj-overview-primary">
+        <section className="prj-panel">
+          <div className="prj-section-heading"><div><span className="prj-eyebrow">接下来，一步一步推进</span><h2>值得先关注的工作</h2></div><Button type="text" onClick={() => onTab('tasks')}>全部任务 <ArrowRightOutlined/></Button></div>
+          {ordered.length ? <div className="prj-focus-list">{ordered.map(task => <button className="prj-focus-task" key={task.id} onClick={() => onOpen(task.id)}><span className={`prj-task-indicator ${task.status}`}><CheckCircleOutlined/></span><span className="prj-focus-task-copy"><span className="prj-task-code">{task.code}</span><strong>{task.title}</strong><span className="prj-task-description">{task.status === 'blocked' ? task.blocker || '请补充需要的帮助' : task.status === 'review' ? '已提交成果，等待约定接收人检查' : task.deliverable || '交付约定待补充'}</span><span className="prj-focus-task-meta"><Person id={task.ownerId} members={state.members} size={20}/><span>{task.due ? `${dateLabel(task.due)} 截止` : '期限待约定'}</span></span></span><span className="prj-focus-task-end"><StatusTag value={task.status}/><ArrowRightOutlined/></span></button>)}</div>
+            : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={state.tasks.length ? '所有任务都已标记完成，继续核对阶段验收。' : '还没有任务，从一份具体交付开始。'}><Button type="primary" icon={<PlusOutlined/>} disabled={!canCreate(state)} onClick={onNewTask}>新建任务</Button></Empty>}
+          <p className="prj-footnote">顺序依据受阻、期限与待交接记录整理，可在副驾中查看具体依据。</p>
+        </section>
+        <section className="prj-panel">
+          <div className="prj-section-heading"><div><span className="prj-eyebrow">从任务，到阶段结果</span><h2>交付路线</h2></div><Button type="text" onClick={() => onTab('milestones')}>里程碑 <ArrowRightOutlined/></Button></div>
+          {insight.milestones.length ? <div className="prj-phase-list">{insight.milestones.map((phase, index) => <button className={`prj-phase ${phase.status === 'accepted' ? 'accepted' : ''}`} key={phase.id || index} onClick={() => onTab('milestones')}><span className="prj-phase-step">{phase.status === 'accepted' ? <CheckCircleOutlined/> : String(index + 1).padStart(2, '0')}</span><span className="prj-phase-copy"><strong>{phase.title}</strong><span>{phase.due ? `${dateLabel(phase.due)} 计划交付` : '阶段日期待约定'} · {phase.verifiedDone}/{phase.total} 项已有交接记录</span><Progress percent={phase.total ? Math.round(phase.verifiedDone / phase.total * 100) : 0} showInfo={false} strokeColor="#2f7c67"/></span><Tag color={phase.status === 'accepted' ? 'success' : undefined}>{phase.status === 'accepted' ? '已记录验收' : phase.total && phase.verifiedDone === phase.total ? '等待阶段验收' : '推进中'}</Tag></button>)}</div>
+            : <div className="prj-empty-route"><FlagOutlined/><div><strong>让阶段完成有明确的判断标准</strong><p>里程碑把一组任务连接成可检查的结果。</p></div><Button disabled={!canManage(state)} onClick={onPlan}>协助制定规划</Button></div>}
+        </section>
+        <section className="prj-panel"><div className="prj-section-heading"><div><span className="prj-eyebrow">留下协作的上下文</span><h2>最近发生</h2></div><Button type="text" onClick={() => onTab('activity')}>全部动态 <ArrowRightOutlined/></Button></div><ActivityList activities={(state.activities || []).slice(0, 3)} state={state} onOpen={onOpen}/></section>
+      </div>
+      <aside className="prj-overview-aside">
+        <section className="prj-panel prj-attention-panel"><div className="prj-section-heading"><div><span className="prj-eyebrow">当前记录中的信号</span><h2>协作观察</h2></div><span className="prj-rule-label">本地规则</span></div><p className="prj-health-summary">{health.summary}</p>{actionable.length ? <div className="prj-signal-list">{actionable.map(signal => <button key={signal.id} className={`prj-signal ${signal.severity}`} onClick={() => signal.taskId ? onOpen(signal.taskId) : onTab('insights')}><span className="prj-signal-dot"/><span><strong>{signal.title}</strong><small>{signal.taskCode ? `${signal.taskCode} · ` : ''}{signal.taskTitle || signal.evidence[0]}</small><p>{signal.action}</p></span><ArrowRightOutlined/></button>)}</div> : <p className="prj-muted">当前记录没有触发规则提醒，继续关注实际协作情况。</p>}<Button block onClick={() => onTab('insights')}>查看依据与行动建议 <ArrowRightOutlined/></Button></section>
+        <section className="prj-panel"><div className="prj-section-heading"><h2>一起推进的人</h2><Button type="text" size="small" onClick={() => onTab('members')} aria-label="查看项目成员"><TeamOutlined/></Button></div><div className="prj-team-list">{state.members.map(person => <div className="prj-team-person" key={person.id}><Person id={person.id} members={state.members} size={32}/><span><small>{person.role || '项目协作者'}</small><strong>{state.tasks.filter(task => task.ownerId === person.id && task.status !== 'done').length} 项待推进</strong></span></div>)}</div><Button block icon={<PlusOutlined/>} disabled={!canManage(state)} onClick={onAddMember}>添加伙伴</Button></section>
+        {state.decisions?.length > 0 && <section className="prj-panel"><div className="prj-section-heading"><h2>共同约定</h2><span className="prj-muted">{state.decisions.length} 条</span></div>{state.decisions.map(decision => <article className="prj-decision" key={decision.id}><strong>{decision.title}</strong><p>{decision.detail}</p></article>)}</section>}
+      </aside>
+    </div>
+  </div>;
+}

@@ -14,7 +14,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const TYPES = {'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.md':'text/plain; charset=utf-8','.json':'application/json; charset=utf-8','.png':'image/png'};
 const COOKIE = 'cobuild_session';
 const localHost = /^(?:localhost|127\.0\.0\.1|\[::1\]|(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.[\d.]+)(?::\d+)?$/;
-const pagePath = /^\/(?:dashboard|projects(?:\/[A-Za-z0-9_-]+\/(?:overview|tasks|mine|members|milestones|deliverables|activity|settings))?|people(?:\/[A-Za-z0-9_-]+)?|settings|login|setup|invite\/[A-Za-z0-9_-]{43})\/?$/;
+const pagePath = /^\/(?:dashboard|projects(?:\/[A-Za-z0-9_-]+\/(?:overview|tasks|mine|members|milestones|deliverables|insights|activity|settings))?|people(?:\/[A-Za-z0-9_-]+)?|settings|login|setup|invite\/[A-Za-z0-9_-]{43})\/?$/;
 const validRole = value => { const role = value ?? 'member'; if (!['admin','member','viewer'].includes(role)) throw new AppError('项目访问角色不正确'); return role; };
 const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const loopbackHost = hostname => ['localhost','[::1]','::1'].includes(hostname) || /^127(?:\.\d{1,3}){3}$/.test(hostname);

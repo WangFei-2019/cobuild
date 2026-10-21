@@ -8,6 +8,7 @@ export function avatarInitial(person){const initial=String(person?.initial||'').
 export const safeColor=value=>/^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(value||'')?value:'#28577b';
 export const canManage=state=>state?.permissions?.manageProject===true;
 export const canCreate=state=>canManage(state)||state?.permissions?.createTask===true;
+export function shanghaiDay(now=new Date()){const parts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(now).map(part=>[part.type,part.value]));return `${parts.year}-${parts.month}-${parts.day}`;}
 export function dateLabel(value,year=false){if(!value)return '未设置';const date=new Date(String(value).length===10?`${value}T12:00:00`:value);return Number.isNaN(date.getTime())?value:date.toLocaleDateString('zh-CN',{year:year?'numeric':undefined,month:'2-digit',day:'2-digit'});}
 export function timeLabel(value){const date=new Date(value);return Number.isNaN(date.getTime())?'':date.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});}
 export function safeURL(value){if(!value)return '';if(/^\/api\/files\/[a-z0-9-]+$/i.test(value)||/^\/samples\/[\w.-]+$/.test(value))return value;try{const url=new URL(value);return ['http:','https:'].includes(url.protocol)&&!url.username&&!url.password?url.href:'';}catch{return '';}}

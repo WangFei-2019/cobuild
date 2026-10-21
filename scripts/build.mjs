@@ -11,6 +11,7 @@ await build({
   minify:true,
   sourcemap:false,
   target:['es2022'],
+  alias:{'node:crypto':resolve(root,'src/browser-crypto.js')},
   define:{'process.env.NODE_ENV':'"production"',__COBUILD_DEMO__:'false'},
   legalComments:'external',
   logLevel:'info'
