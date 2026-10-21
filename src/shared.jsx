@@ -1,11 +1,11 @@
 import React,{useState} from 'react';
 import {App as AntApp,Avatar,Button,Card,Collapse,Divider,Empty,Input,Modal,Segmented,Select,Space,Table,Tag,Timeline,Tooltip,Typography} from 'antd';
 import {AppstoreOutlined,ArrowRightOutlined,ClockCircleOutlined,EllipsisOutlined,ExportOutlined,FileOutlined,LinkOutlined,PlusOutlined,ProjectOutlined,TeamOutlined,WarningOutlined,EditOutlined} from '@ant-design/icons';
-import {STATUS,STATUS_COLOR,PRIORITY,PRIORITY_ORDER,isDemo,download,safeColor,dateLabel,timeLabel,safeURL,canManage,canCreate} from './lib.js';
+import {STATUS,STATUS_COLOR,PRIORITY,PRIORITY_ORDER,isDemo,download,avatarInitial,safeColor,dateLabel,timeLabel,safeURL,canManage,canCreate} from './lib.js';
 const {Text}=Typography;
 export function Person({id,members,avatarOnly = false,size = 24}) {
   const person = members.find(item => item.id === id);
-  const avatar = <Avatar size={size} style={{backgroundColor:safeColor(person?.color),fontSize:size < 28 ? 12 : 14}}>{person?.initial || person?.name?.slice(-1) || '?'}</Avatar>;
+  const avatar = <Avatar size={size} style={{backgroundColor:safeColor(person?.color),fontSize:size < 28 ? 12 : 14}}>{avatarInitial(person)}</Avatar>;
   return avatarOnly ? <Tooltip title={`${person?.name || '未指定'} · ${person?.role || ''}`}>{avatar}</Tooltip> : <span className="person">{avatar}<span>{person?.name || '未指定'}</span></span>;
 }
 

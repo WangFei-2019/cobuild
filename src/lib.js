@@ -4,6 +4,7 @@ export const STATUS_COLOR={todo:'default',doing:'processing',blocked:'warning',r
 export const PRIORITY={high:'高',medium:'普通',low:'低'};
 export const PRIORITY_ORDER={high:0,medium:1,low:2};
 export const isDemo=typeof __COBUILD_DEMO__!=='undefined'&&__COBUILD_DEMO__;
+export function avatarInitial(person){const initial=String(person?.initial||'').trim();if(/^[\p{L}\p{N}]{1,2}$/u.test(initial))return initial;const fullName=String(person?.name||''),name=fullName.replace(/[（(][^）)]*[）)]/gu,'').trim();const characters=name.match(/[\p{L}\p{N}]/gu)||fullName.match(/[\p{L}\p{N}]/gu);return characters?.at(-1)?.toLocaleUpperCase()||'?';}
 export const safeColor=value=>/^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(value||'')?value:'#28577b';
 export const canManage=state=>state?.permissions?.manageProject===true;
 export const canCreate=state=>canManage(state)||state?.permissions?.createTask===true;
