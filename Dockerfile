@@ -3,6 +3,7 @@ WORKDIR /build
 RUN npm install --global pnpm@11.25.0 --ignore-scripts
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
+COPY *.mjs ./
 COPY src ./src
 COPY public/index.html ./public/index.html
 COPY public/samples ./public/samples
