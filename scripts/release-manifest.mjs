@@ -18,12 +18,12 @@ const traversedDirectories = new Set(['src', 'public', 'scripts', 'tests', '.git
 export const REQUIRED_RELEASE_FILES = Object.freeze([
   'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'server.mjs', 'domain.mjs',
   'workspace.mjs', 'identity.mjs', 'people.mjs', 'dashboard.mjs', 'planning.mjs', 'insights.mjs', 'ai-exchange.mjs', 'tests/insights.test.mjs',
-  'scripts/build.mjs', 'scripts/start.mjs', 'scripts/licenses.mjs',
+  'scripts/build.mjs', 'scripts/start.mjs', 'scripts/runtime-config.mjs', 'scripts/doctor.mjs', 'scripts/backup.mjs', 'scripts/licenses.mjs',
   'scripts/package-release.mjs', 'scripts/release-manifest.mjs', 'scripts/verify-release.mjs',
   'public/index.html', 'public/app.js', 'public/app.css', 'public/THIRD_PARTY_NOTICES.txt',
   'src/main.jsx', 'README.md', 'Dockerfile', 'compose.yaml', 'compose.registry.yaml',
   '.github/workflows/ci.yml', '.github/workflows/publish-image.yml', '.github/workflows/pages.yml',
-  'scripts/build-pages.mjs', 'src/browser-crypto.js', 'src/demo-api.js', 'demo/seed.json',
+  'scripts/build-pages.mjs', 'src/service-entry.jsx', 'src/service-entry.css', 'src/service-origin.js', 'src/browser-crypto.js', 'src/demo-api.js', 'demo/seed.json',
 ]);
 
 export function isReleaseFile(path) {

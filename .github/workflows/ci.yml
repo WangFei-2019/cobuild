@@ -32,7 +32,7 @@ jobs:
         run: node --test tests/*.test.mjs
       - name: Build production frontend
         run: node scripts/build.mjs
-      - name: Build static Pages demo
+      - name: Build Pages entry and explicit demo
         run: node scripts/build-pages.mjs
       - name: Check local runtime configuration
         run: npm run doctor

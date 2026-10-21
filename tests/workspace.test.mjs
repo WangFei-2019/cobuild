@@ -14,7 +14,7 @@ async function fixture(t, { legacy } = {}) {
   let server;
   let base;
   async function start() {
-    server = createApp({ dataDir, authRequired:false });
+    server = createApp({ dataDir, authRequired:false, seedDemo:true });
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
     base = `http://127.0.0.1:${server.address().port}`;
@@ -41,7 +41,7 @@ const taskInput = (projectId, title = '本项目的任务') => ({ projectId, typ
 test('索引写入失败时项目原字节和内存均恢复，重启不会读到失败的修改', t => {
   const dataDir = mkdtempSync(join(tmpdir(), 'cobuild-save-failure-'));
   t.after(() => rmSync(dataDir, { recursive: true, force: true }));
-  const workspace = createWorkspace(dataDir), before = structuredClone(workspace.state());
+  const workspace = createWorkspace(dataDir, {seedDemo:true}), before = structuredClone(workspace.state());
   const projectPath = join(dataDir, 'project.json'), indexPath = join(dataDir, 'workspace.json');
   const bytes = readFileSync(projectPath), index = workspace.view();
   renameSync(indexPath, `${indexPath}.backup`); mkdirSync(indexPath);

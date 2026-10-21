@@ -22,7 +22,7 @@ async function fixture(t) {
   }
   async function start() {
     // Production authentication is deliberately left enabled.
-    app = createApp({dataDir,publicUrl:'',setupToken:''});
+    app = createApp({dataDir,publicUrl:'',setupToken:'',seedDemo:true});
     base = await listen(app);
   }
   await start();

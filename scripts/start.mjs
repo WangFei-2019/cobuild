@@ -1,16 +1,13 @@
-import { readFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { runtimeEnvironment, runtimeOptions } from './runtime-config.mjs';
+import { validateServerConfig } from '../server.mjs';
 
-// Compose mounts secrets as files. Only the server process receives their values.
-const childEnv = { ...process.env };
-for (const name of ['COBUILD_SETUP_TOKEN', 'COBUILD_AI_API_KEY']) {
-  const path = childEnv[`${name}_FILE`];
-  if (!path) continue;
-  try { childEnv[name] = readFileSync(path, 'utf8').trim(); }
-  catch { process.stderr.write(`无法读取 ${name}_FILE 指定的配置文件。\n`); process.exit(1); }
-}
+// Read file-backed credentials before launching; values are never printed.
+let childEnv;
+try { childEnv = runtimeEnvironment(process.env); }
+catch (error) { process.stderr.write(error.message + '\n'); process.exit(1); }
 const args = process.argv.slice(2);
 const configIndex = args.indexOf('--ai-config-stdin');
 if (configIndex >= 0) {
@@ -40,7 +37,14 @@ if (configIndex >= 0) {
   }
   if (process.exitCode) process.exit(process.exitCode);
 }
-const child = spawn(process.execPath, [fileURLToPath(new URL('../server.mjs', import.meta.url)), ...args], {
+let options;
+try {
+  options = runtimeOptions(childEnv, args);
+  validateServerConfig(options);
+} catch (error) { process.stderr.write(error.message + '\n'); process.exit(1); }
+// Explicit arguments ensure PORT also works on platforms whose server CLI only reads COBUILD_PORT.
+const serverArgs = ['--host', options.host, '--port', String(options.port)];
+const child = spawn(process.execPath, [fileURLToPath(new URL('../server.mjs', import.meta.url)), ...serverArgs], {
   env: childEnv,
   stdio: 'inherit'
 });

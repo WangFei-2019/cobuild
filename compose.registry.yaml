@@ -3,9 +3,12 @@ services:
   app:
     image: ${COBUILD_IMAGE:?Set COBUILD_IMAGE to a GHCR digest or exact version}
     restart: unless-stopped
+    stop_grace_period: 30s
     environment:
       COBUILD_PUBLIC_URL: ${COBUILD_PUBLIC_URL:?Set the public HTTPS origin}
       COBUILD_DATA_DIR: /app/.local
+      COBUILD_PORT: "4173"
+      COBUILD_DOMAIN: ${COBUILD_DOMAIN:?Set the public domain}
       COBUILD_SETUP_TOKEN_FILE: /run/secrets/setup_token
       COBUILD_AI_API_KEY_FILE: /run/secrets/ai_api_key
       COBUILD_AI_BASE_URL: ${COBUILD_AI_BASE_URL:-}

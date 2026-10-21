@@ -46,3 +46,34 @@ test('空的可选模型secret文件允许手动协作，无效模型配置会�
   assert.equal(incomplete.status, 1);
   assert.equal(incomplete.report.checks.find(item => item.name === 'ai').level, 'error');
 });
+
+test('预检读取secret内容，拒绝空白初始化口令及不可读/多行凭证，不泄露内容', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'cobuild-doctor-content-'));
+  t.after(() => rmSync(dir, {recursive:true, force:true}));
+  const token = join(dir, 'setup'); writeFileSync(token, ' \n\t');
+  const whitespace = run({COBUILD_PUBLIC_URL:'https://example.test', COBUILD_SETUP_TOKEN_FILE:token}, true);
+  assert.equal(whitespace.status, 1);
+  assert.match(whitespace.report.checks.find(item => item.name === 'secrets').message, /空白/);
+  const secret = 'only-private-setup-value'; writeFileSync(token, secret + '\n');
+  const valid = run({COBUILD_PUBLIC_URL:'https://example.test', COBUILD_DOMAIN:'example.test', COBUILD_SETUP_TOKEN_FILE:token}, true);
+  assert.equal(valid.status, 0, valid.stdout);
+  assert.ok(!valid.stdout.includes(secret));
+  for (const value of [{COBUILD_SETUP_TOKEN_FILE:join(dir,'missing')}, {COBUILD_AI_API_KEY:'private-first\nprivate-second'}]) {
+    const invalid = run(value);
+    assert.equal(invalid.status, 1);
+    assert.ok(!invalid.stdout.includes('private-first'));
+  }
+});
+
+test('预检校验代理域名与公开地址，按实际PORT优先级检查端口', () => {
+  const base = {COBUILD_PUBLIC_URL:'https://example.test', COBUILD_SETUP_TOKEN:'private-setup'};
+  const mismatch = run({...base, COBUILD_DOMAIN:'different.test'}, true);
+  assert.equal(mismatch.status, 1);
+  assert.match(mismatch.report.checks.find(item => item.name === 'server').message, /一致/);
+  const port = run({...base, COBUILD_DOMAIN:'EXAMPLE.test', PORT:'10000'}, true);
+  assert.equal(port.status, 0, port.stdout);
+  assert.match(port.report.checks.find(item => item.name === 'port').message, /10000/);
+  const precedence = run({...base, PORT:'10000', COBUILD_PORT:'4500'}, true);
+  assert.match(precedence.report.checks.find(item => item.name === 'port').message, /4500/);
+  assert.equal(run({...base, PORT:'not-a-port'}, true).status, 1);
+});

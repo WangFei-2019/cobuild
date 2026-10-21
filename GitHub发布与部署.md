@@ -1,16 +1,18 @@
-# GitHub Pages 演示发布与完整服务备选
+# GitHub 入口发布与正式协作服务部署
 
-本次默认发布独立仓库 WangFei-2019/cobuild 的 GitHub Pages 交互演示。静态演示使用公开种子数据和浏览器存储，无真实账号、多人同步、服务端 AI 或密钥。完整版本仍可使用 Node.js 24、GHCR 镜像和有持久磁盘的 HTTPS 服务端，作为后续选项。GitHub Pages 仅提供静态 HTML/CSS/JavaScript，不能运行原来的 Node 后端。[GitHub Pages 官方说明](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages)
+正式协作使用 Node.js 24 与持久存储运行后端。独立仓库 WangFei-2019/cobuild 的 GitHub Pages 首页改为工作区连接入口，用户确认服务地址后前往该服务器登录。原演示独立保留在 `demo.html`，沿用浏览器中已有的示例与改动，无真实账号、多人同步、服务端 AI 或密钥。GitHub Pages 仅提供静态 HTML/CSS/JavaScript，不能运行原来的 Node 后端。[GitHub Pages 官方说明](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages)
 
-## 默认：Pages 演示发布
+## Pages 工作区入口与独立演示
 
 先按下节生成独立发布目录并将其内容作为仓库根，不能推送工作区父目录。公开仓库可使用 GitHub Free 的 Pages；私有仓库可用性依账号方案，仓库所有者需核对。
 
-在 GitHub 仓库打开 **Settings → Pages → Build and deployment → Source，选择 GitHub Actions**。这一步需先完成；configure-pages 仅读取已开启的站点配置，工作流不会自动开启 Pages。若此步失败，日志会输出同样的可操作指引；完成设置后在 Actions 重新运行 Deploy Pages demo。
+在 GitHub 仓库打开 **Settings → Pages → Build and deployment → Source，选择 GitHub Actions**。这一步需先完成；configure-pages 仅读取已开启的站点配置，工作流不会自动开启 Pages。若此步失败，日志会输出同样的可操作指引；完成设置后在 Actions 重新运行 Deploy CoBuild entry。
 
 pages.yml 在 main push 或手动触发后进行冻结安装、全量测试、独立静态构建，仅上传 dist-pages，并由 github-pages 环境部署。构建与部署分 job，部署 job 只获 pages:write 和 id-token:write；不需要保存 AI key、服务器口令或个人 token。预期项目站点为 https://wangfei-2019.github.io/cobuild/ ，实际是否已上线以成功的 deployment URL 为准。
 
-本地构建命令为 pnpm install --frozen-lockfile 后运行 pnpm build:pages。产物使用相对的 app.js/app.css 和 hash 路由，适配 /cobuild/ 子路径与页面刷新。构建会拒绝缺失演示适配器/种子数据、包含服务器身份数据库模块的产物，不会把 public 目录直接当作 Pages 版本发布。
+本地构建命令为 pnpm install --frozen-lockfile 后运行 pnpm build:pages。`index.html` 使用独立 `entry.js/entry.css`，不加载演示适配器；`demo.html` 使用 `app.js/app.css` 和 hash 路由，适配 /cobuild/ 子路径与页面刷新。资源 URL 带实际内容摘要，避免发布后混用旧资源。
+
+仓库 Settings → Secrets and variables → Actions → Variables 可配置公开变量 `COBUILD_SERVICE_URL`，值为正式服务 HTTPS 根地址（支持 IP 和自定义端口）。本仓库 Pages 工作流预置当前已部署的 `https://123.57.227.212:5175`，公开变量可覆盖此地址；本地构建未指定该变量时由使用者输入，不声称已部署。该地址可保存在本机浏览器。入口不会跨域调用账号 API 或传送项目资料，而是直接导航到所选服务，登录会话留在服务自身的站点。不要将初始化口令、模型密钥或带邀请令牌的 URL 填入此变量。构建会拒绝缺失演示适配器/种子数据、包含服务器身份数据库模块的产物，不会把 public 目录直接当作 Pages 版本发布。
 
 浏览器 SHA-256 适配使用精确锁定的 @noble/hashes 2.4.0，同步保持里程碑指纹与重规划 ID 语义；随机 ID 使用浏览器安全随机数。它只供 Pages 构建，正式后端仍用 node:crypto。静态产物保留第三方许可。[Pages 自定义 Actions](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)、[noble-hashes 官方用法](https://github.com/paulmillr/noble-hashes#usage)
 
@@ -89,6 +91,6 @@ docker compose --project-name cobuild --file compose.registry.yaml ps
 
 ## 4. Render 作为备选
 
-Render 可从本仓库 Dockerfile 构建完整服务，但要在选定平台后再创建实例。必须配置单实例付费 persistent disk，并把 COBUILD_DATA_DIR 指向挂盘目录（如 /app/.local），在平台私有环境或 Secret File 配置初始化口令与模型 key，PUBLIC_URL 设为最终 HTTPS 站点。当前启动脚本默认监听 0.0.0.0:4173，可通过 COBUILD_PORT 配置平台指定端口。
+Render 可从本仓库 Dockerfile 构建完整服务，但要在选定平台后再创建实例。必须配置单实例付费 persistent disk，并把 COBUILD_DATA_DIR 指向挂盘目录（如 /app/.local），在平台私有环境或 Secret File 配置初始化口令与模型 key，PUBLIC_URL 设为最终 HTTPS 站点。Docker 默认监听 0.0.0.0:4173；启动器按 --port、COBUILD_PORT、PORT、4173 的顺序选端口。Compose 内部端口固定 4173。
 
 Render 默认文件系统临时，只有挂盘路径在部署与重启后保留；挂盘服务只能单实例，更新会有短暂中断。不能把“GitHub 自动构建”当成“数据已经持久化”。本版未创建 Render 项目，也未提供未经验证的一键 Blueprint。[Render Docker](https://render.com/docs/docker)、[Render 持久磁盘与限制](https://render.com/docs/disks)

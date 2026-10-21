@@ -48,8 +48,8 @@ export function taskNextAction(task){
 }
 function TaskItem({task}){
  const action=taskNextAction(task);
- return <article className={`my-work-task ${action.kind}`}>
-  <div className="my-work-task-main"><div className="my-work-task-code">{task.code||'任务'}{task.priority==='high'&&<Tag color="orange">高优先级</Tag>}</div><button className="my-work-task-title" onClick={()=>navigate(routeHref(task.project.id,'tasks',task.id))}>{task.title}</button><div className={`my-work-due${task.isOverdue?' overdue':''}`}><ClockCircleOutlined/><span>{task.due?`${dateLabel(task.due)} 截止`:'未设置截止日期'}</span>{task.isOverdue&&<strong>已逾期</strong>}{!task.isOverdue&&task.isDueSoon&&<span>7 天内</span>}</div>{task.blocker&&<p className="my-work-blocker"><WarningOutlined/>{task.blocker}</p>}</div>
+ return <article className={`my-work-task ${action.kind}`} style={{'--work-project-color':safeColor(task.project.color)}}>
+  <div className="my-work-task-main"><div className="my-work-task-code"><button className="my-work-task-project" title={`${task.project.name} · 进入项目`} onClick={()=>navigate(routeHref(task.project.id))}><i aria-hidden="true"/>{task.project.name}</button><span>{task.code||'任务'}</span>{task.priority==='high'&&<Tag color="orange">高优先级</Tag>}</div><button className="my-work-task-title" onClick={()=>navigate(routeHref(task.project.id,'tasks',task.id))}>{task.title}</button><div className={`my-work-due${task.isOverdue?' overdue':''}`}><ClockCircleOutlined/><span>{task.due?`${dateLabel(task.due)} 截止`:'未设置截止日期'}</span>{task.isOverdue&&<strong>已逾期</strong>}{!task.isOverdue&&task.isDueSoon&&<span>7 天内</span>}</div>{task.blocker&&<p className="my-work-blocker"><WarningOutlined/>{task.blocker}</p>}</div>
   <div className="my-work-task-responsibility"><span>{RELATIONS[task.relation]||'未直接分配给我'}</span><StatusTag value={task.status}/></div>
   <div className="my-work-task-next"><p>{action.description}</p><Button type={action.kind==='review'?'primary':'default'} size="small" onClick={()=>navigate(routeHref(task.project.id,'tasks',task.id))}>{action.label}<ArrowRightOutlined/></Button></div>
  </article>;
@@ -70,7 +70,7 @@ export default function Dashboard({workspace,user}){
  function clearFilters(){setQuery('');setDebounced('');setProjectId(undefined);setTimeFilter('any');}
  const filtered=Boolean(projectId||timeFilter!=='any'),limited=searchActive?searchReady&&model.searchLimited:model.personalLimited;
  const columns=[
-  {title:'项目与任务',key:'title',width:340,render:(_,task)=><div className="my-work-table-task"><button className="my-work-table-project" style={{'--work-project-color':safeColor(task.project.color)}} onClick={()=>navigate(routeHref(task.project.id))}><i/>{task.project.name}</button><button className="my-work-task-title" onClick={()=>navigate(routeHref(task.project.id,'tasks',task.id))}>{task.code} · {task.title}</button></div>},
+  {title:'项目与任务',key:'title',width:340,render:(_,task)=><div className="my-work-table-task" style={{'--work-project-color':safeColor(task.project.color)}}><button className="my-work-table-project my-work-task-project" title={`${task.project.name} · 进入项目`} onClick={()=>navigate(routeHref(task.project.id))}><i/>{task.project.name}</button><button className="my-work-task-title" onClick={()=>navigate(routeHref(task.project.id,'tasks',task.id))}>{task.code} · {task.title}</button></div>},
   {title:'我的关系',dataIndex:'relation',width:150,render:relation=>RELATIONS[relation]||'未直接分配给我'},
   {title:'状态',dataIndex:'status',width:110,render:status=><StatusTag value={status}/>},
   {title:'截止日期',dataIndex:'due',width:125,sorter:compareTasks,render:(date,task)=><span className={task.isOverdue?'my-work-overdue-text':''}>{dateLabel(date)}{task.isOverdue?' · 逾期':''}</span>},

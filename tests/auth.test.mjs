@@ -16,7 +16,7 @@ async function fixture(t,options = {}) {
   let server,base;
   async function start() {
     // This intentionally uses the production default authentication path.
-    server = createApp({dataDir,...options});
+    server = createApp({dataDir,seedDemo:true,...options});
     server.listen(0,'127.0.0.1'); await once(server,'listening');
     base = `http://127.0.0.1:${server.address().port}`;
   }

@@ -1,4 +1,4 @@
-import {readFileSync} from 'node:fs';
+import {readFileSync,realpathSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {collectReleaseFiles, listAllFiles, MANIFEST_NAME} from './release-manifest.mjs';
@@ -23,7 +23,7 @@ export function verifyRelease(root) {
   return {ok:true, files:collected.length, version:meta.version};
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const args = process.argv.slice(2);
     if (args.length > 1) throw new Error('用法：node scripts/verify-release.mjs /发布目录');

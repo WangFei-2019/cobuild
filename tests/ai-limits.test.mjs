@@ -26,7 +26,7 @@ async function fixture(t, { calls = 10, seconds = 600, slow = false } = {}) {
   const modelBase = await listen(model);
   Object.assign(process.env, { COBUILD_AI_BASE_URL: `${modelBase}/v1`, COBUILD_AI_API_KEY: 'limits-fixture-only',
     COBUILD_AI_MODEL: 'limits-fixture', COBUILD_AI_TIMEOUT_MS: '3000', COBUILD_AI_RATE_LIMIT: String(calls), COBUILD_AI_RATE_WINDOW_SECONDS: String(seconds) });
-  const base = await listen(createApp({ dataDir, publicUrl: '', setupToken: '' }));
+  const base = await listen(createApp({ dataDir, publicUrl: '', setupToken: '', seedDemo:true }));
   t.after(async () => {
     for (const response of requests) if (!response.writableEnded) finish(response);
     for (const server of servers.reverse()) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }

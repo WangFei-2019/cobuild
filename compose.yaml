@@ -2,9 +2,12 @@ services:
   app:
     build: .
     restart: unless-stopped
+    stop_grace_period: 30s
     environment:
       COBUILD_PUBLIC_URL: ${COBUILD_PUBLIC_URL:?请在.env中设置HTTPS公开地址}
       COBUILD_DATA_DIR: /app/.local
+      COBUILD_PORT: "4173"
+      COBUILD_DOMAIN: ${COBUILD_DOMAIN:?Set the public domain}
       COBUILD_SETUP_TOKEN_FILE: /run/secrets/setup_token
       COBUILD_AI_API_KEY_FILE: /run/secrets/ai_api_key
       COBUILD_AI_BASE_URL: ${COBUILD_AI_BASE_URL:-}

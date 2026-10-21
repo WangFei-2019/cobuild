@@ -45,13 +45,14 @@ export function packageRelease({source = sourceRoot, output, archive} = {}) {
   verifyRelease(target);
   if (archivePath) {
     mkdirSync(dirname(archivePath),{recursive:true});
-    const result = spawnSync('tar',['-czf',archivePath,'-C',target,'.'],{stdio:'inherit'});
+    // macOS otherwise adds AppleDouble/xattr sidecar files outside the allowlist.
+    const result = spawnSync('tar',['--no-xattrs','-czf',archivePath,'-C',target,'.'],{stdio:'inherit',env:{...process.env,COPYFILE_DISABLE:'1'}});
     if (result.error || result.status !== 0) throw new Error('归档失败；已生成的目录仍可用于独立仓库');
   }
   return {directory:target, archive:archivePath, files:files.length, version:meta.version};
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const options = {};
     const args = process.argv.slice(2);

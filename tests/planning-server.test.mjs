@@ -48,7 +48,7 @@ test('authenticated HTTP planning generates without writes, applies atomically, 
     }
   });
   // Do not pass authRequired:false: this test exercises production authentication.
-  const base = await listen(servers, createApp({ dataDir, publicUrl: '', setupToken: '' }));
+  const base = await listen(servers, createApp({ dataDir, publicUrl: '', setupToken: '', seedDemo:true }));
   let cookie = '';
   async function request(path, body, authenticated = true) {
     const headers = {};

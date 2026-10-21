@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -48,6 +48,29 @@ test('integrity verification rejects changed contents and unlisted private files
   assert.throws(()=>verifyRelease(output),/未列入清单/);
 });
 
+test('release archive extracts to exactly the verified allowlist without platform metadata sidecars',t=>{
+  const {source,output,base}=fixture(t),archive=join(base,'release.tar.gz'),extracted=join(base,'extracted');
+  packageRelease({source,output,archive});
+  mkdirSync(extracted);
+  const result=spawnSync('tar',['-xzf',archive,'-C',extracted],{encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr);
+  assert.equal(verifyRelease(extracted).ok,true);
+});
+
+test('release packaging and verification CLIs actually execute through a current-version directory symlink',t=>{
+  const {base}=fixture(t),alias=join(base,'current'),output=join(base,'actual-package');
+  symlinkSync(fileURLToPath(new URL('../',import.meta.url)),alias,'dir');
+  const pack=spawnSync(process.execPath,[join(alias,'scripts/package-release.mjs'),'--out',output],{encoding:'utf8'});
+  assert.equal(pack.status,0,pack.stderr);
+  assert.equal(JSON.parse(pack.stdout).directory,realpathSync(output));
+  const verify=spawnSync(process.execPath,[join(alias,'scripts/verify-release.mjs'),output],{encoding:'utf8'});
+  assert.equal(verify.status,0,verify.stderr);
+  assert.equal(JSON.parse(verify.stdout).ok,true);
+  const invalid=spawnSync(process.execPath,[join(alias,'scripts/verify-release.mjs'),output,'unexpected'],{encoding:'utf8'});
+  assert.equal(invalid.status,1);
+  assert.match(invalid.stderr,/用法/);
+});
+
 test('packager refuses overwrites, nested paths, symlinked files and recognisable credentials',t=>{
   const {source,output,base} = fixture(t);
   assert.throws(()=>packageRelease({source,output:source}),/之外/);
@@ -73,14 +96,19 @@ test('release paths reject traversal, hidden state and env files while allowing 
   for (const path of ['.env.example','server.mjs','dashboard.mjs','src/main.jsx','scripts/doctor.mjs','.github/workflows/ci.yml']) assert.equal(isReleaseFile(path),true,path);
 });
 
-test('Pages entry uses relative asset URLs versioned by actual JS and CSS contents',()=>{
+test('Pages service entry and explicit demo use relative URLs versioned by their actual assets',()=>{
   const root = fileURLToPath(new URL('../',import.meta.url));
   const build = spawnSync(process.execPath,['scripts/build-pages.mjs'],{cwd:root,encoding:'utf8'});
   assert.equal(build.status,0,build.stderr);
-  const html = readFileSync(join(root,'dist-pages/index.html'),'utf8');
-  for (const [extension,attribute] of [['js','src'],['css','href']]) {
-    const hash = createHash('sha256').update(readFileSync(join(root,'dist-pages/app.' + extension))).digest('hex').slice(0,12);
-    assert.ok(html.includes(attribute + '="./app.' + extension + '?v=' + hash + '"'),extension + ' URL must match its content digest');
+  for(const [file,stem] of [['index.html','entry'],['demo.html','app']]){
+   const html = readFileSync(join(root,'dist-pages',file),'utf8');
+   for (const [extension,attribute] of [['js','src'],['css','href']]) {
+    const hash = createHash('sha256').update(readFileSync(join(root,'dist-pages',stem+'.'+extension))).digest('hex').slice(0,12);
+    assert.ok(html.includes(attribute + '="./'+stem+'.'+extension+'?v='+hash+'"'),file+': '+extension+' URL must match its content digest');
+   }
+   assert.ok(!html.includes('src="/app.js"') && !html.includes('href="/app.css"'));
   }
-  assert.ok(!html.includes('src="/app.js"') && !html.includes('href="/app.css"'));
+  assert.match(readFileSync(join(root,'dist-pages/index.html'),'utf8'),/进入工作区/);
+  assert.match(readFileSync(join(root,'dist-pages/demo.html'),'utf8'),/交互演示/);
+  assert.ok(!readFileSync(join(root,'dist-pages/entry.js'),'utf8').includes('cobuild.demo.state'));
 });

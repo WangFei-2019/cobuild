@@ -1,4 +1,4 @@
-name: Deploy Pages demo
+name: Deploy CoBuild entry
 
 on:
   push:
@@ -33,7 +33,9 @@ jobs:
           pnpm install --frozen-lockfile
       - name: Run tests
         run: node --test tests/*.test.mjs
-      - name: Build static demo
+      - name: Build service entry and explicit demo
+        env:
+          COBUILD_SERVICE_URL: ${{ vars.COBUILD_SERVICE_URL || 'https://123.57.227.212:5175' }}
         run: node scripts/build-pages.mjs
       - name: Configure Pages
         id: pages_configuration

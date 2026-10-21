@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync, realpathSync } from 'node:fs';
 import { dirname, extname, join, resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
@@ -65,14 +65,15 @@ export function validateServerConfig({host = '127.0.0.1',port = 4173,publicUrl =
   return {host,port,publicUrl:deployment?.origin || ''};
 }
 
-// authRequired:false exists exclusively for isolated legacy tests; the CLI never disables authentication.
+// authRequired:false and seedDemo:true are explicit isolated-test options.
+// The CLI always uses real authentication and a genuinely empty new workspace.
 export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT, '.local'), authRequired = true,
-  publicUrl = process.env.COBUILD_PUBLIC_URL || '', setupToken = process.env.COBUILD_SETUP_TOKEN || '' } = {}) {
+  publicUrl = process.env.COBUILD_PUBLIC_URL || '', setupToken = process.env.COBUILD_SETUP_TOKEN || '', seedDemo = false } = {}) {
   mkdirSync(join(dataDir, 'files'), { recursive: true });
   const deployment = deploymentURL(publicUrl);
   const secureCookie = deployment?.protocol === 'https:';
   const remoteDeployment = deployment && !loopbackHost(deployment.hostname);
-  const workspace = createWorkspace(dataDir);
+  const workspace = createWorkspace(dataDir, { seedDemo });
   const identity = authRequired ? createIdentity(dataDir) : null;
   const aiRequests = aiLimiter();
   if (identity) for (const state of workspace.allStates()) identity.syncProject(state);
@@ -411,7 +412,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
   return server;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
   const readArg = (flag,fallback) => args.includes(flag) ? args[args.indexOf(flag)+1] : fallback;
   const port = Number(readArg('--port',process.env.COBUILD_PORT || '4173'));

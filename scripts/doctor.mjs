@@ -1,6 +1,7 @@
-import {accessSync, constants, existsSync, readFileSync, statSync} from 'node:fs';
+import {accessSync, constants, existsSync, statSync} from 'node:fs';
 import {dirname, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {runtimeEnvironment, runtimeOptions} from './runtime-config.mjs';
 
 // Read-only diagnostics: no setup, database writes or provider requests.
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -27,31 +28,27 @@ try {
   add('storage', 'ok', existsSync(file) ? '数据目录具备写入权限；未修改任何数据。' : '数据目录尚未创建，其父目录可写；启动时创建。');
 } catch { add('storage', 'error', '数据目录或其父目录不可写，请检查挂载卷与运行用户权限。'); }
 
-function hasSecret(name) {
-  if (process.env[name]?.trim()) return true;
-  const path = process.env[`${name}_FILE`];
-  if (!path) return false;
-  try { accessSync(path, constants.R_OK); return statSync(path).isFile() && statSync(path).size > 0; }
-  catch { return false; }
-}
-if (runtimeOK) {
+let env;
+try { env = runtimeEnvironment(process.env); add('secrets', 'ok', '凭证格式与文件内容检查通过；不显示其内容。'); }
+catch (error) { add('secrets', 'error', error.message); }
+if (runtimeOK && env) {
   try {
     const {validateServerConfig} = await import('../server.mjs');
     const production = flags.has('--production');
-    const publicUrl = process.env.COBUILD_PUBLIC_URL || '';
-    if (production && !publicUrl) throw new Error('公开部署需要配置 COBUILD_PUBLIC_URL。');
-    validateServerConfig({host: production ? '0.0.0.0' : '127.0.0.1', port:4173, publicUrl});
-    add('server', 'ok', production ? '公开地址与 HTTPS 监听规则通过。' : '本机监听规则通过。');
-    if (production) add('setup-secret', hasSecret('COBUILD_SETUP_TOKEN') ? 'ok' : 'error', hasSecret('COBUILD_SETUP_TOKEN') ? '已提供初始化口令配置；不显示其内容。' : '公开部署需提供 COBUILD_SETUP_TOKEN 或可读的 COBUILD_SETUP_TOKEN_FILE。');
+    if (production && !env.COBUILD_PUBLIC_URL) throw new Error('公开部署需要配置 COBUILD_PUBLIC_URL。');
+    const config = runtimeOptions(env, [], {production});
+    validateServerConfig(config);
+    add('server', 'ok', production ? '公开地址、域名与 HTTPS 监听规则通过。' : '本机监听规则通过。');
+    add('port', 'ok', '监听端口 ' + config.port + '（COBUILD_PORT 优先，其次 PORT，默认 4173）。');
+    if (production) add('setup-secret', env.COBUILD_SETUP_TOKEN ? 'ok' : 'error', env.COBUILD_SETUP_TOKEN ? '已提供非空初始化口令；不显示其内容。' : '公开部署需提供 COBUILD_SETUP_TOKEN 或非空的 COBUILD_SETUP_TOKEN_FILE。');
   } catch (error) { add('server', 'error', error.message); }
   try {
     const {aiStatus} = await import('../planning.mjs');
     const previous = process.env.COBUILD_AI_API_KEY;
-    // Test file-backed configuration without reading its credential contents.
-    if (!previous?.trim() && hasSecret('COBUILD_AI_API_KEY')) process.env.COBUILD_AI_API_KEY = 'doctor-file-presence-only';
+    process.env.COBUILD_AI_API_KEY = env.COBUILD_AI_API_KEY;
     try {
       const status = aiStatus();
-      const requested = ['COBUILD_AI_BASE_URL', 'COBUILD_AI_MODEL', 'COBUILD_AI_API_KEY'].some(name => process.env[name]?.trim());
+      const requested = ['COBUILD_AI_BASE_URL', 'COBUILD_AI_MODEL', 'COBUILD_AI_API_KEY'].some(name => env[name]?.trim());
       add('ai', status.configured ? 'ok' : requested ? 'error' : 'info', status.configured ? '模型配置字段通过；本检查不联网验证密钥、余额或模型能力。' : requested ? '模型配置不完整或无效，请检查服务端配置；未显示配置内容。' : '未配置 AI，仍可手动管理项目与里程碑。');
     } finally {
       if (previous === undefined) delete process.env.COBUILD_AI_API_KEY;

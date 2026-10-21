@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { AppError, seedState } from './domain.mjs';
@@ -85,23 +85,30 @@ function creationState(input, { allowDuplicateNames = false } = {}) {
   };
 }
 
-export function createWorkspace(dataDir) {
+export function createWorkspace(dataDir, { seedDemo = false } = {}) {
+  if (typeof seedDemo !== 'boolean') throw new Error('seedDemo 需要为布尔值，仅供显式示例或测试初始化');
   mkdirSync(join(dataDir, 'projects'), { recursive: true });
   const originalPath = join(dataDir, 'project.json');
   const indexPath = join(dataDir, 'workspace.json');
-  if (!existsSync(originalPath)) writeJSON(originalPath, seedState());
-  const original = readJSON(originalPath, validState);
-  const originalId = original.project.id;
+  if (!existsSync(indexPath) && readdirSync(join(dataDir, 'projects')).some(name => name.endsWith('.json'))) {
+    throw new Error('项目目录中已有数据但缺少 workspace.json 索引，已保留原文件。请先恢复工作区索引');
+  }
+  // Existing records always win. A persisted empty workspace must stay empty,
+  // even when an isolated test later opts into demo initialization.
+  if (seedDemo && !existsSync(indexPath) && !existsSync(originalPath)) writeJSON(originalPath, seedState());
+  const original = existsSync(originalPath) ? readJSON(originalPath, validState) : null;
+  const originalId = original?.project.id || null;
   let index;
   if (existsSync(indexPath)) {
     index = readJSON(indexPath, value => record(value) && value.schemaVersion === 1 && Number.isSafeInteger(value.revision) && value.revision > 0
-      && value.defaultProjectId === originalId && Array.isArray(value.projectIds) && value.projectIds.length > 0
-      && value.projectIds.every(validId) && new Set(value.projectIds).size === value.projectIds.length && value.projectIds.includes(originalId));
+      && Array.isArray(value.projectIds) && value.projectIds.every(validId) && new Set(value.projectIds).size === value.projectIds.length
+      && (value.projectIds.length === 0 ? value.defaultProjectId === null : validId(value.defaultProjectId) && value.projectIds.includes(value.defaultProjectId))
+      && (!originalId || value.projectIds.includes(originalId)));
   } else {
-    index = { schemaVersion: 1, revision: 1, defaultProjectId: originalId, projectIds: [originalId] };
+    index = { schemaVersion: 1, revision: 1, defaultProjectId: originalId, projectIds: originalId ? [originalId] : [] };
     writeJSON(indexPath, index);
   }
-  const states = new Map([[originalId, original]]);
+  const states = new Map(original ? [[originalId, original]] : []);
   const pathFor = id => id === originalId ? originalPath : join(dataDir, 'projects', `${id}.json`);
   for (const id of index.projectIds) {
     if (id === originalId) continue;
@@ -110,6 +117,7 @@ export function createWorkspace(dataDir) {
 
   function resolveId(requestedId) {
     const id = requestedId === undefined ? index.defaultProjectId : requestedId;
+    if (requestedId === undefined && id === null) throw new AppError('工作区还没有项目，请先创建项目', 404);
     if (!validId(id)) throw new AppError('项目标识不正确');
     if (!states.has(id)) throw new AppError('没有找到这个项目', 404);
     return id;
@@ -162,7 +170,7 @@ export function createWorkspace(dataDir) {
       const state = creationState(input, options);
       if (options.decorate) options.decorate(state);
       const id = state.project.id;
-      const nextIndex = { ...index, revision: index.revision + 1, projectIds: [...index.projectIds, id] };
+      const nextIndex = { ...index, revision: index.revision + 1, defaultProjectId: index.defaultProjectId || id, projectIds: [...index.projectIds, id] };
       const path = pathFor(id);
       writeJSON(path, state);
       try { writeJSON(indexPath, nextIndex); }
@@ -173,7 +181,7 @@ export function createWorkspace(dataDir) {
     reset(requestedId, { preserveProject = false } = {}) {
       const id = resolveId(requestedId), current = states.get(id);
       let next;
-      if (id === originalId && !preserveProject) {
+      if (seedDemo && id === originalId && !preserveProject) {
         next = seedState(); next.project.id = id;
       } else {
         next = structuredClone(current);

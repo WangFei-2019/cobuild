@@ -14,7 +14,7 @@ async function fixture(t) {
   const dataDir = mkdtempSync(join(tmpdir(), 'cobuild-profiles-'));
   let server, base;
   async function start() {
-    server = createApp({ dataDir, publicUrl: '', setupToken: '' });
+    server = createApp({ dataDir, publicUrl: '', setupToken: '', seedDemo:true });
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     base = `http://127.0.0.1:${server.address().port}`;
   }

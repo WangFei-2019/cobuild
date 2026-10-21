@@ -12,6 +12,9 @@
 !public/samples/**
 !scripts/
 !scripts/start.mjs
+!scripts/runtime-config.mjs
+!scripts/doctor.mjs
+!scripts/backup.mjs
 !scripts/build.mjs
 !scripts/licenses.mjs
 # Defence in depth for accidental local files inside source directories.

@@ -41,7 +41,7 @@ test('交付表单旧快照在交付物、负责人或接收人变更后均冲�
 
 test('默认鉴权文件交付的旧版本返回409且不写文件，核对最新版本后可上传下载', async t => {
   const dataDir = mkdtempSync(join(tmpdir(), 'cobuild-handoff-conflict-'));
-  const server = createApp({ dataDir, publicUrl: '', setupToken: '' });
+  const server = createApp({ dataDir, publicUrl: '', setupToken: '', seedDemo:true });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const base = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); rmSync(dataDir, { recursive: true, force: true }); });

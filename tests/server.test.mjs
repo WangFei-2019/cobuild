@@ -8,7 +8,7 @@ import {createApp} from '../server.mjs';
 
 async function fixture(t) {
   const dataDir = mkdtempSync(join(tmpdir(),'cobuild-test-'));
-  const server = createApp({dataDir,authRequired:false});
+  const server = createApp({dataDir,authRequired:false,seedDemo:true});
   server.listen(0,'127.0.0.1'); await once(server,'listening');
   t.after(async () => { await new Promise(resolve => server.close(resolve)); rmSync(dataDir,{recursive:true,force:true}); });
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -29,7 +29,7 @@ test('不同客户端读取同一份更新，持久化包含原始进展', async
   assert.deepEqual(clientB,clientA);
   const disk = JSON.parse(readFileSync(join(dataDir,'project.json'),'utf8'));
   assert.equal(disk.activities[0].text,raw);
-  const reopened = createApp({dataDir,authRequired:false});
+  const reopened = createApp({dataDir,authRequired:false,seedDemo:true});
   reopened.listen(0,'127.0.0.1'); await once(reopened,'listening');
   try {
     const saved = await (await fetch(`http://127.0.0.1:${reopened.address().port}/api/state`)).json();
