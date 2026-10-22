@@ -60,7 +60,8 @@ test('默认鉴权、真实管理员身份、持久哈希会话、退出和会�
   assert.equal((await anonymous.json('/api/auth/session')).setupRequired,true);
   for(const path of ['/api/state','/api/workspace','/api/people','/api/export','/api/report','/api/files/aaaaaaaa-bbbb']) assert.equal((await anonymous.get(path)).status,401,path);
   assert.equal((await anonymous.post('/api/action',{type:'addMember',actorId:'m0',name:'冒充者'})).status,401);
-  for(const path of ['/projects','/projects/p1/overview','/projects/p1/mine','/people','/people/person-example','/settings','/setup','/login']) assert.equal((await anonymous.get(path)).status,200,path);
+  for(const path of ['/projects','/projects/p1/overview','/projects/p1/mine','/people','/people/person-example','/settings','/setup','/login','/account','/account/profile','/account/security','/account/ai']) assert.equal((await anonymous.get(path)).status,200,path);
+  for(const path of ['/account/unknown','/account/ai/extra','/account/password']) assert.equal((await anonymous.get(path)).status,404,path);
   assert.equal((await anonymous.get('/projects/p1/not-a-page')).status,404);
   assert.equal((await anonymous.get('/missing.js')).status,404);
   assert.equal((await anonymous.get('/server.mjs')).status,404);

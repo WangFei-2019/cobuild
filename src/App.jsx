@@ -22,8 +22,8 @@ migrateLegacyURL();
 export default function Application(){
  const {message,modal}=AntApp.useApp(),route=useRoute();
  const [session,setSession]=useState(null),[sessionError,setSessionError]=useState(null),[demoEpoch,setDemoEpoch]=useState(0);
- useEffect(()=>{window.scrollTo(0,0);},[route.kind,route.projectId,route.personId,route.tab]);
- useEffect(()=>{if(route.kind!=='project')document.title=`${({dashboard:'我的工作台',projects:'项目中心',people:'人员目录',person:'人员主页',account:'个人设置',notifications:'通知中心',settings:isDemo?'演示与存储说明':'工作区设置',login:'登录',register:'注册账号',setup:'首次设置',invite:'项目邀请','forgot-password':'找回密码','reset-password':'设置新密码','verify-email':'验证邮箱','404':'页面不存在'})[route.kind]||'共建'} · 共建`;},[route.kind]);
+ useEffect(()=>{window.scrollTo(0,0);},[route.kind,route.projectId,route.personId,route.tab,route.section]);
+ useEffect(()=>{if(route.kind!=='project')document.title=`${({dashboard:'我的工作台',projects:'项目中心',people:'人员目录',person:'人员主页',account:`${({profile:'个人资料',security:'账号安全',ai:'AI 服务'})[route.section]||'个人资料'} · 个人设置`,notifications:'通知中心',settings:isDemo?'演示与存储说明':'工作区设置',login:'登录',register:'注册账号',setup:'首次设置',invite:'项目邀请','forgot-password':'找回密码','reset-password':'设置新密码','verify-email':'验证邮箱','404':'页面不存在'})[route.kind]||'共建'} · 共建`;},[route.kind,route.section]);
  async function loadSession(){try{setSession(await api('/api/auth/session'));setSessionError(null);}catch(error){setSessionError(error);}}
  function saveGuideStatus(accountId,onboarding){setSession(current=>mergeOnboardingSession(current,accountId,onboarding));}
  function receiveAccountSession(accountId,incoming){setSession(current=>(current?.user?.id||null)===accountId?incoming:current);}
@@ -85,7 +85,7 @@ function Workspace({session,route,onLogout,onSessionExpired,onAccountSession,onG
  else if(route.kind==='project')content=<ProjectPage key={route.projectId} route={route} metadata={project} onWorkspaceRefresh={refresh} onSampleArchived={result=>{receiveWorkspace(result.workspace);notifications.refresh();}} onProjectArchived={result=>{receiveWorkspace(result.workspace);notifications.refresh();}} onMembershipChanged={result=>{receiveWorkspace(result.workspace);notifications.refresh();}} onSessionExpired={onSessionExpired}/>;
  else if(route.kind==='people')content=<main className="workspace-main standalone-page"><PeoplePage session={session} onChanged={()=>{refresh();onSessionExpired();}}/></main>;
  else if(route.kind==='person')content=<main className="workspace-main standalone-page"><PersonPage key={route.personId} personId={route.personId} session={session} onChanged={()=>{refresh();onSessionExpired();}}/></main>;
- else if(route.kind==='account')content=<main className="workspace-main standalone-page"><AccountPage session={session} onSession={onAccountSession} onChanged={refresh}/></main>;
+ else if(route.kind==='account')content=<main className="workspace-main standalone-page"><AccountPage section={route.section} session={session} onSession={onAccountSession} onChanged={refresh}/></main>;
  else if(route.kind==='notifications')content=<main className="workspace-main standalone-page"><NotificationsPage notifications={notifications} workspace={workspace}/></main>;
  else if(route.kind==='settings')content=<main className="workspace-main standalone-page"><SettingsPage session={session}/></main>;
  else content=<Result status="404" title="页面不存在" extra={<Button onClick={()=>navigate('/dashboard')}>返回工作台</Button>}/>;

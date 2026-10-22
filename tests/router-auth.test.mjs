@@ -13,6 +13,16 @@ test('independent registration has its own route and rejects extra path segments
  assert.equal(parseRoute(new URL('https://cobuild.example/register/extra')).kind,'404');
 });
 
+test('account sections have independent deep links, compatible entry and safe login returns',()=>{
+ assert.deepEqual(parseRoute(new URL('https://cobuild.example/account')),{kind:'account',section:'profile'});
+ for(const section of ['profile','security','ai']){
+  const path='/account/'+section;
+  assert.deepEqual(parseRoute(new URL('https://cobuild.example'+path)),{kind:'account',section});
+  assert.equal(parseRoute(new URL(authHref('login',path),'https://cobuild.example')).next,path);
+ }
+ for(const path of ['/account/unknown','/account/ai/extra','/account/password'])assert.equal(parseRoute(new URL('https://cobuild.example'+path)).kind,'404');
+});
+
 test('login and registration links retain the exact invitation return path',()=>{
  const invited='/invite/token-ABC_123';
  const login=parseRoute(new URL(authHref('login',invited),'https://cobuild.example'));
