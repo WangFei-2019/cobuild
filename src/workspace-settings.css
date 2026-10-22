@@ -1,0 +1,21 @@
+.workspace-settings .workspace-settings-tabs{margin-top:8px}
+.workspace-settings .workspace-settings-tabs>.ant-tabs-nav{margin-bottom:22px}
+.workspace-settings .workspace-settings-tabs>.ant-tabs-nav .ant-tabs-tab{padding:13px 5px;font-size:14px}
+.workspace-settings .ant-tabs-content-holder,.workspace-settings-panel,.workspace-settings .ant-card{min-width:0}
+.workspace-settings-section-heading{margin:0 0 20px}
+.workspace-settings-section-heading h2{font-size:18px;line-height:1.5;margin:0 0 7px}
+.workspace-settings-section-heading p{font-size:13px;line-height:1.8;color:#66736b;margin:0;max-width:760px}
+.workspace-settings-status-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
+.workspace-settings .workspace-settings-status-grid .settings-card{margin:0}
+.workspace-settings-status-grid .ant-card-head-title{white-space:normal}
+.workspace-settings-status-grid .ant-card-extra{margin-inline-start:10px}
+.workspace-settings-status-grid .ant-card-body{display:flex;flex-direction:column;align-items:flex-start;gap:12px}
+.workspace-settings-status-grid p{line-height:1.9;color:#59675f;margin:0;flex:1}
+.workspace-settings-overview-note{font-size:13px;line-height:1.9;color:#66736b;margin:22px 0 0}
+.workspace-settings-overview-note .ant-btn-link{height:auto;padding:0;font-size:inherit}
+.workspace-settings-instructions{margin-top:20px;border-top:1px solid #e5ebe6;padding-top:16px}
+.workspace-settings-instructions summary{font-size:13px;font-weight:600;cursor:pointer;color:#41544a}
+.workspace-settings-instructions .model-instructions{margin-bottom:0}
+.workspace-settings .settings-details dd{overflow-wrap:anywhere}
+.workspace-settings-demo .settings-card{max-width:960px}
+@media(max-width:700px){.workspace-settings-status-grid{grid-template-columns:1fr;gap:14px}.workspace-settings-section-heading{margin-bottom:16px}.workspace-settings .workspace-settings-tabs>.ant-tabs-nav .ant-tabs-tab{padding:12px 2px}.workspace-settings .workspace-settings-tabs .ant-tabs-nav-list{gap:8px}.workspace-settings .workspace-settings-tabs .ant-tabs-tab+.ant-tabs-tab{margin-left:12px}.workspace-settings-status-grid .ant-card-body{gap:10px}}

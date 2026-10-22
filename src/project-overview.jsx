@@ -1,5 +1,5 @@
-import React from 'react';
-import {Button, Empty, Progress, Tag} from 'antd';
+import React,{useState} from 'react';
+import {Button, Collapse, Empty, Progress, Tag} from 'antd';
 import {ArrowRightOutlined, CheckCircleOutlined, EditOutlined, FlagOutlined, PlusOutlined, TeamOutlined} from '@ant-design/icons';
 import {deriveProjectInsights} from '../insights.mjs';
 import {activeMembers, canCreate, canManage, dateLabel, safeColor, taskIsOpen} from './lib.js';
@@ -8,6 +8,8 @@ import {ActivityList, Person, StatusTag} from './shared.jsx';
 export default function ProjectOverview({state, onOpen, onTab, onNewTask, onAddMember, onEdit, onPlan}) {
   const insight = deriveProjectInsights(state);
   const {counts, health} = insight;
+  const [moreDecisions,setMoreDecisions]=useState(false);
+  const members=activeMembers(state),phases=insight.milestones.slice(0,3),decisions=moreDecisions?state.decisions:state.decisions?.slice(0,2);
   const complete = counts.total ? Math.round(counts.verifiedDone / counts.total * 100) : 0;
   const taskIds = [...new Set(insight.suggestions.map(item => item.taskId).filter(Boolean))];
   const ordered = [...taskIds.map(id => state.tasks.find(task => task.id === id)), ...state.tasks.filter(taskIsOpen)]
@@ -42,15 +44,16 @@ export default function ProjectOverview({state, onOpen, onTab, onNewTask, onAddM
         </section>
         <section className="prj-panel">
           <div className="prj-section-heading"><div><h2>阶段交付</h2></div><Button type="text" onClick={() => onTab('milestones')}>查看里程碑 <ArrowRightOutlined/></Button></div>
-          {insight.milestones.length ? <div className="prj-phase-list">{insight.milestones.map((phase, index) => <button className={`prj-phase ${phase.status === 'accepted' ? 'accepted' : ''}`} key={phase.id || index} onClick={() => onTab('milestones')}><span className="prj-phase-step">{phase.status === 'accepted' ? <CheckCircleOutlined/> : String(index + 1).padStart(2, '0')}</span><span className="prj-phase-copy"><strong>{phase.title}</strong><span>{phase.due ? `${dateLabel(phase.due)} 计划交付` : '阶段日期待约定'} · {phase.verifiedDone}/{phase.total} 项已有交接记录</span><Progress percent={phase.total ? Math.round(phase.verifiedDone / phase.total * 100) : 0} showInfo={false} strokeColor="#2f7c67"/></span><Tag color={phase.status === 'accepted' ? 'success' : undefined}>{phase.status === 'accepted' ? '已记录验收' : phase.total && phase.verifiedDone === phase.total ? '等待阶段验收' : '推进中'}</Tag></button>)}</div>
+          {insight.milestones.length ? <div className="prj-phase-list">{phases.map((phase, index) => <button className={`prj-phase ${phase.status === 'accepted' ? 'accepted' : ''}`} key={phase.id || index} onClick={() => onTab('milestones')}><span className="prj-phase-step">{phase.status === 'accepted' ? <CheckCircleOutlined/> : String(index + 1).padStart(2, '0')}</span><span className="prj-phase-copy"><strong>{phase.title}</strong><span>{phase.due ? `${dateLabel(phase.due)} 计划交付` : '阶段日期待约定'} · {phase.verifiedDone}/{phase.total} 项已有交接记录</span><Progress percent={phase.total ? Math.round(phase.verifiedDone / phase.total * 100) : 0} showInfo={false} strokeColor="#2f7c67"/></span><Tag color={phase.status === 'accepted' ? 'success' : undefined}>{phase.status === 'accepted' ? '已记录验收' : phase.total && phase.verifiedDone === phase.total ? '等待阶段验收' : '推进中'}</Tag></button>)}</div>
             : <div className="prj-empty-route"><FlagOutlined/><div><strong>让阶段完成有明确的判断标准</strong><p>里程碑把一组任务连接成可检查的结果。</p></div><Button disabled={!canManage(state)} onClick={onPlan}>协助制定规划</Button></div>}
+          {insight.milestones.length>phases.length&&<p className="prj-preview-note">展示前 {phases.length} 个阶段，完整计划请查看里程碑。</p>}
         </section>
         <section className="prj-panel"><div className="prj-section-heading"><div><h2>最近动态</h2></div><Button type="text" onClick={() => onTab('activity')}>全部动态 <ArrowRightOutlined/></Button></div><ActivityList activities={(state.activities || []).slice(0, 3)} state={state} onOpen={onOpen}/></section>
       </div>
       <aside className="prj-overview-aside">
 
-        <section className="prj-panel"><div className="prj-section-heading"><h2>成员与分工</h2><Button type="text" size="small" onClick={() => onTab('members')} aria-label="查看项目成员"><TeamOutlined/></Button></div><div className="prj-team-list">{activeMembers(state).map(person => <div className="prj-team-person" key={person.id}><Person id={person.id} members={state.members} size={32}/><span><small>{person.role || '项目协作者'}</small><strong>{state.tasks.filter(task => task.ownerId === person.id && taskIsOpen(task)).length} 项负责未完成</strong></span></div>)}</div>{state.permissions?.manageMembers!==false&&<Button block icon={<PlusOutlined/>} disabled={!canManage(state)} onClick={onAddMember}>添加伙伴</Button>}</section>
-        {state.decisions?.length > 0 && <section className="prj-panel"><div className="prj-section-heading"><h2>项目约定</h2><span className="prj-muted">{state.decisions.length} 条</span></div>{state.decisions.map(decision => <article className="prj-decision" key={decision.id}><strong>{decision.title}</strong><p>{decision.detail}</p></article>)}</section>}
+        <section className="prj-panel"><div className="prj-section-heading"><h2>成员与分工</h2><Button type="text" size="small" onClick={() => onTab('members')} aria-label="查看项目成员"><TeamOutlined/></Button></div><div className="prj-team-list">{members.slice(0,5).map(person => <div className="prj-team-person" key={person.id}><Person id={person.id} members={state.members} size={32}/><span><small>{person.role || '项目协作者'}</small><strong>{state.tasks.filter(task => task.ownerId === person.id && taskIsOpen(task)).length} 项负责未完成</strong></span></div>)}</div>{members.length>5&&<Button block type="text" onClick={()=>onTab('members')}>查看全部 {members.length} 位成员 <ArrowRightOutlined/></Button>}{state.permissions?.manageMembers!==false&&<Button block icon={<PlusOutlined/>} disabled={!canManage(state)} onClick={onAddMember}>添加伙伴</Button>}</section>
+        {state.decisions?.length > 0 && <section className="prj-panel"><div className="prj-section-heading"><h2>项目约定</h2><span className="prj-muted">{state.decisions.length} 条</span></div><Collapse className="prj-decision-preview" ghost size="small" items={decisions.map(decision=>({key:decision.id,label:decision.title,children:<p>{decision.detail}</p>}))}/>{state.decisions.length>2&&<Button type="link" size="small" onClick={()=>setMoreDecisions(value=>!value)}>{moreDecisions?'收起约定':`查看其余 ${state.decisions.length-2} 条约定`}</Button>}</section>}
       </aside>
     </div>
   </div>;
