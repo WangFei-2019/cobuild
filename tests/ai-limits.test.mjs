@@ -49,7 +49,9 @@ async function fixture(t, { calls = 10, seconds = 600, slow = false } = {}) {
     const email = `limits-${index}@example.test`, guest = client();
     const invitation = await admin('/api/invitations', { projectId: 'p1', email, accessRole: 'admin' });
     const inviteToken = new URL(invitation.body.invitation.url).pathname.split('/').at(-1);
-    assert.equal((await guest('/api/auth/register', { name: `参与者${index}`, email, password, inviteToken })).status, 200);
+    const registered=await guest('/api/auth/register', { name: `参与者${index}`, email, password, inviteToken });
+    assert.equal(registered.status,200);
+    assert.equal((await admin('/api/admin/ai/access',{accountId:registered.body.user.id,enabled:true,limit:100,expectedRevision:0})).status,200);
     return guest;
   };
   const waitFor = count => requests.length >= count ? Promise.resolve() : new Promise(resolve => {

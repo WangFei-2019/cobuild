@@ -263,15 +263,15 @@ export function applyMilestoneAction(state, input) {
   return reconcileMilestones(next);
 }
 
-function integerSetting(name, fallback, min, max) {
-  const value = process.env[name];
+function integerSetting(name, fallback, min, max, env) {
+  const value = env[name];
   if (value === undefined || value === '') return fallback;
   const number = Number(value);
   return Number.isSafeInteger(number) && number >= min && number <= max ? number : null;
 }
-function settings() {
+function settings(env = process.env) {
   let baseUrl = '', endpoint = '', valid = true;
-  const raw = (process.env.COBUILD_AI_BASE_URL || '').trim();
+  const raw = (env.COBUILD_AI_BASE_URL || '').trim();
   if (raw) {
     try {
       const url = new URL(raw);
@@ -281,20 +281,20 @@ function settings() {
       endpoint = baseUrl + '/chat/completions';
     } catch { valid = false; }
   }
-  const key = (process.env.COBUILD_AI_API_KEY || '').trim(), model = (process.env.COBUILD_AI_MODEL || '').trim();
+  const key = (env.COBUILD_AI_API_KEY || '').trim(), model = (env.COBUILD_AI_MODEL || '').trim();
   if (model.length > 128 || /[\r\n]/.test(model) || /[\r\n]/.test(key)) valid = false;
-  const timeoutMs = integerSetting('COBUILD_AI_TIMEOUT_MS', 30000, 100, 120000);
-  const maxTokens = integerSetting('COBUILD_AI_MAX_TOKENS', 6000, 512, 12000);
-  const format = process.env.COBUILD_AI_RESPONSE_FORMAT || 'json_schema';
-  const tokenParameter = process.env.COBUILD_AI_TOKEN_PARAMETER || 'max_completion_tokens';
-  const thinking = process.env.COBUILD_AI_THINKING?.trim() || undefined;
+  const timeoutMs = integerSetting('COBUILD_AI_TIMEOUT_MS', 30000, 100, 120000, env);
+  const maxTokens = integerSetting('COBUILD_AI_MAX_TOKENS', 6000, 512, 12000, env);
+  const format = env.COBUILD_AI_RESPONSE_FORMAT || 'json_schema';
+  const tokenParameter = env.COBUILD_AI_TOKEN_PARAMETER || 'max_completion_tokens';
+  const thinking = env.COBUILD_AI_THINKING?.trim() || undefined;
   if (!['json_schema', 'json_object'].includes(format) || !['max_completion_tokens', 'max_tokens'].includes(tokenParameter)) valid = false;
   if (thinking !== undefined && !['enabled', 'disabled'].includes(thinking)) valid = false;
   return { configured: Boolean(valid && baseUrl && key && model && timeoutMs && maxTokens), provider: 'openai-compatible', baseUrl, endpoint, key, model, timeoutMs, maxTokens, format, tokenParameter, thinking };
 }
 
-export function aiStatus() {
-  const { configured, provider, model, baseUrl, key } = settings();
+export function aiStatus(env = process.env) {
+  const { configured, provider, model, baseUrl, key } = settings(env);
   const redact = value => key ? value.replaceAll(key, '[redacted]') : value;
   return { configured, provider, model: redact(model), baseUrl: redact(baseUrl) };
 }
@@ -311,8 +311,8 @@ function outputSchema(memberIds, replan = false) {
 }
 
 /** No state mutation; only a fully validated draft is returned. */
-async function generateDraft(state, input, replan = false) {
-  const config = settings();
+async function generateDraft(state, input, replan = false, options = {}) {
+  const config = settings(options.env);
   if (!config.configured) throw new AppError('AI 规划尚未配置或配置无效。请配置 COBUILD_AI_BASE_URL、COBUILD_AI_API_KEY 和 COBUILD_AI_MODEL 后重启服务。模型地址必须使用 HTTPS；仅本机 localhost、127.0.0.1 或 [::1] 可使用 HTTP。', 503);
   stateShape(state);
   object(input, '规划要求', ['goal', 'deadline', 'constraints', 'scope', 'projectId'], ['goal']);
@@ -375,8 +375,8 @@ async function generateDraft(state, input, replan = false) {
   } finally { clearTimeout(timer); }
 }
 
-export async function generatePlan(state, input) { return generateDraft(state, input, false); }
-export async function generateReplan(state, input) { return generateDraft(state, input, true); }
+export async function generatePlan(state, input, options) { return generateDraft(state, input, false, options); }
+export async function generateReplan(state, input, options) { return generateDraft(state, input, true, options); }
 
 const REPLAN_TASK_FIELDS = ['title', 'description', 'ownerId', 'reviewerId', 'due', 'deliverable', 'dependsOn', 'milestoneId'];
 const REPLAN_MILESTONE_FIELDS = ['title', 'goal', 'due', 'acceptanceCriteria'];

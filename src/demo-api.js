@@ -7,6 +7,7 @@ import { dashboardSummary } from '../dashboard.mjs';
 import {deriveNotifications,notificationReadIds,notificationView} from '../notifications.mjs';
 import { buildSampleState, markSampleState, isSampleState, sampleOwner, sampleInfo, sampleProjectInput } from '../sample.mjs';
 import { peopleSummary, personDetails, profileFields, checkProfileDuplicates, projectWithProfiles } from '../people.mjs';
+import {extractProjectTemplate,validateProjectTemplate,previewProjectTemplate,instantiateProjectTemplate,previewTaskBatch,applyTaskBatch} from '../productivity.mjs';
 
 export const DEMO_STORAGE_KEY = 'cobuild.pages.demo.v1';
 export const DEMO_MODEL = '内置示例 · 非AI生成';
@@ -37,7 +38,8 @@ function dataShape(value) {
     && (!Object.hasOwn(value,'archivedProjects') || Array.isArray(value.archivedProjects) && value.archivedProjects.every(entry=>record(entry)&&!isSampleState(entry.state)&&entry.state?.project?.id&&typeof entry.archivedAt==='string'))
     && (!Object.hasOwn(value,'notificationReads') || record(value.notificationReads)&&Object.values(value.notificationReads).every(ids=>Array.isArray(ids)&&ids.every(id=>typeof id==='string'&&/^[a-f0-9]{64}$/.test(id))))
     && value.people.some(person => person.id === value.currentPersonId)
-    && (!Object.hasOwn(value,'onboarding') || validOnboarding(value.onboarding));
+    && (!Object.hasOwn(value,'onboarding') || validOnboarding(value.onboarding))
+    && (value.templates===undefined||Array.isArray(value.templates)&&value.templates.length<=100&&value.templates.every(item=>record(item)&&typeof item.id==='string'&&Number.isSafeInteger(item.revision)&&typeof item.archivedAt==='string'&&record(item.template)));
 }
 
 /** Explicit, browser-only demo repository. Never called as a server/network fallback. */
@@ -160,6 +162,16 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     const actorId = identity(doc).membership(state.project.id, doc.currentPersonId)?.memberId;
     if (!actorId) throw new AppError('当前体验者尚未加入该演示项目', 403);
     return { ...input, actorId };
+  }
+  function templateRecord(doc,id){const item=(doc.templates||[]).find(item=>item.id===id);if(!item)throw new AppError('没有找到这份本地模板',404);return item;}
+  function selectedTemplate(doc,input){if(Boolean(input.templateId)===Boolean(input.template))throw new AppError('请选择一份模板');if(input.templateId){const item=templateRecord(doc,input.templateId);if(item.archivedAt)throw new AppError('模板已归档，请先恢复',409);return validateProjectTemplate(item.template);}return validateProjectTemplate(input.template);}
+  function createFromTemplate(doc,input){
+    if(Object.keys(input).some(key=>!['templateId','template','startDate','name','roleMap'].includes(key)))throw new AppError('模板创建字段不正确');
+    const template=selectedTemplate(doc,input),start=date(input.startDate);if(!start||!record(input.roleMap)||Object.keys(input.roleMap).length!==template.roles.length||template.roles.some(role=>input.roleMap[role.id]!=='m0'))throw new AppError('请明确由本人承担所有模板角色，创建后再添加伙伴');
+    const deadline=template.project.deadlineOffset===null?'':new Date(Date.parse(start+'T00:00:00Z')+template.project.deadlineOffset*86400000).toISOString().slice(0,10);
+    const created=createProject(doc,{name:input.name,description:template.project.description,goal:template.project.goal,color:template.project.color,deadline,ownerPersonId:doc.currentPersonId},{persistChanges:false}),state=doc.projects.find(item=>item.project.id===created.state.project.id);
+    const next=instantiateProjectTemplate(authorized(doc,state),{actorId:'m0',expectedRevision:state.revision,template,startDate:start,roleMap:input.roleMap},{manageProject:true});
+    doc.projects[doc.projects.indexOf(state)]=cleanState(next);persist(doc);return {state:decorate(doc,next),workspace:workspace(doc)};
   }
   function addPerson(doc, name, color = '#6387a2') {
     const person = { id: `person-${randomUUID()}`, name: text(name, '成员姓名', 40, true), color, initial: [...name].at(-1), bio: '本浏览器的演示成员', accountLinked: false };
@@ -345,6 +357,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
       if (path === '/api/auth/session') return session(doc);
       if (path === '/api/health') return { ok: true, demo: true, app: 'cobuild', authRequired: false };
       if (path === '/api/workspace') return workspace(doc);
+      if(path==='/api/templates'){const values=url.searchParams.getAll('archived');if(values.length>1||values.some(value=>!['true','false'].includes(value)))throw new AppError('模板筛选不正确');return {templates:clone((doc.templates||[]).filter(item=>Boolean(item.archivedAt)===(values[0]==='true')))};}
       if(path==='/api/account')return accountView(doc);
       if(path==='/api/notifications')return inboxView(doc);
       if(path==='/api/members/impact'){const values=url.searchParams.getAll('memberId');if(values.length!==1)throw new AppError('请指定一位项目成员');return memberImpact(stateFor(doc,projectId),adapter,current,values[0]);}
@@ -357,6 +370,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
       if (/^\/api\/people\/[A-Za-z0-9_-]+$/.test(path)) {const id=path.split('/').at(-1);if(!adapter.people().some(person=>person.id===id))throw new AppError('没有找到这个成员档案',404);const detail=personDetails(adapter,visibleStates(doc),current,id);return {demo:true,...detail,person:profileView(doc,detail.person),revision:doc.revision,permissions:{...peoplePermissions,editProfile:!virtualSamplePerson(doc,id)}};}
       if (path === '/api/ai/status') return { configured: false, demo: true, samplePlanning: true, provider: 'local-sample', model: DEMO_MODEL, baseUrl: '', fileLimit: FILE_LIMIT, filesLimit: FILES_LIMIT };
       if (path === '/api/ai/capabilities') { const state=stateFor(doc,projectId); return { configured:false,samplePlanning:true,canGenerate:permissionsFor(doc,state).manageProject&&!permissionsFor(doc,state).readOnly }; }
+      if(path==='/api/ai/access'){stateFor(doc,projectId);return {configured:false,canGenerate:false,source:'none',remaining:0,message:'独立演示不调用真实模型；请进入正式工作区配置自己的 DeepSeek 或开通平台额度。'};}
       if (path === '/api/state') return decorate(doc, stateFor(doc, projectId));
       if (path === '/api/export') return exportState(doc,stateFor(doc, projectId));
       if (path === '/api/report') return projectReport(projectWithProfiles(stateFor(doc, projectId),adapter));
@@ -388,6 +402,14 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     if (path === '/api/samples/archive') return archiveSample(doc,input);
     if (path === '/api/samples/restore') {sampleInput(input,['projectId']);return restoreSample(doc,input.projectId);}
     if (path === '/api/projects') return createProject(doc, input);
+    if(path==='/api/templates'){
+      if(Object.keys(input).length!==1||!input.template)throw new AppError('保存模板只接受核对后的结构');const template=validateProjectTemplate(input.template),records=doc.templates||[];if(records.length>=100||records.filter(item=>!item.archivedAt).length>=50)throw new AppError('模板库已达数量上限，请先归档部分模板',409);
+      const at=now().toISOString(),item={id:'template-'+randomUUID(),name:template.name,description:template.description,template,revision:1,createdAt:at,updatedAt:at,archivedAt:''};doc.templates=[...records,item];persist(doc);return {template:clone(item)};
+    }
+    if(path==='/api/templates/archive'||path==='/api/templates/restore'){
+      if(Object.keys(input).some(key=>!['id','expectedRevision'].includes(key)))throw new AppError('模板归档字段不正确');const item=templateRecord(doc,input.id);if(input.expectedRevision!==item.revision)throw new AppError('模板已有更新，请刷新',409);const restore=path.endsWith('/restore');if(restore&&item.archivedAt&&(doc.templates||[]).filter(record=>!record.archivedAt).length>=50)throw new AppError('活跃模板已达上限',409);if(Boolean(item.archivedAt)===restore){item.archivedAt=restore?'':now().toISOString();item.updatedAt=now().toISOString();item.revision+=1;persist(doc);}return {template:clone(item)};
+    }
+    if(path==='/api/templates/create')return createFromTemplate(doc,input);
     if(path==='/api/projects/archive'||path==='/api/projects/restore')return realProjectArchive(doc,input,path.endsWith('/restore'));
     if(path==='/api/members/action'){
       const state=stateFor(doc,projectId),plan=planMemberAction(state,adapter,current,input);
@@ -396,6 +418,14 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     }
     const state = stateFor(doc, projectId), action = actor(doc, state, input);
     if(permissionsFor(doc,state).readOnly)throw new AppError('当前只有只读或治理查看权限，不能修改此项目',403);
+    if(path==='/api/templates/extract'){
+      if(Object.keys(input).some(key=>!['projectId','name','anchorDate'].includes(key)))throw new AppError('模板提取字段不正确');if(!permissionsFor(doc,state).manageProject)throw new AppError('请由项目管理者提取模板',403);return {template:extractProjectTemplate(state,{name:input.name,anchorDate:input.anchorDate})};
+    }
+    if(path==='/api/templates/preview'||path==='/api/templates/apply'){
+      if(Object.keys(input).some(key=>!['projectId','expectedRevision','templateId','template','startDate','roleMap'].includes(key)))throw new AppError('模板应用字段不正确');const template=selectedTemplate(doc,input),{templateId,...fields}=action,request={...fields,template};if(path.endsWith('/preview'))return {preview:previewProjectTemplate(authorized(doc,state),request,permissionsFor(doc,state))};return {state:saveState(doc,instantiateProjectTemplate(authorized(doc,state),request,permissionsFor(doc,state))),workspace:workspace(doc)};
+    }
+    if(path==='/api/tasks/batch/preview'||path==='/api/tasks/batch'){if(path.endsWith('/preview'))return {preview:previewTaskBatch(authorized(doc,state),action,permissionsFor(doc,state))};return {state:saveState(doc,applyTaskBatch(authorized(doc,state),action,permissionsFor(doc,state)))};}
+    if(path==='/api/ai/assistance'||path==='/api/assistance/apply')throw new AppError('独立演示不调用真实模型或伪造 AI 输出，请进入正式工作区使用',503);
     if(isSampleState(state) && (path==='/api/project-members'||path==='/api/action'&&['addMember','updateMember'].includes(action.type)))throw new AppError('示例使用固定虚拟伙伴，真实协作请创建自己的项目',403);
     if (path === '/api/ai/plan' || path === '/api/ai/replan') return samplePlan(doc, state, input, path.endsWith('/replan'));
     if (path === '/api/analyze') return { analysis: analyzeUpdate(state, action), demo: true };

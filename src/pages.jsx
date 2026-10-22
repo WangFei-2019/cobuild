@@ -5,6 +5,8 @@ import {api,isDemo,avatarInitial,contrastColor,dateLabel,safeColor,timeLabel,use
 import {authHref,navigate,parseRoute,routeHref,safeNextPath} from './router.js';
 import {Artifact,StatusTag} from './shared.jsx';
 import {PersonProfileModal} from './members.jsx';
+import MailIntegration from './integrations.jsx';
+import {PlatformAIAdministration} from './ai-service-settings.jsx';
 const {Text}=Typography;
 export function ResourceState({loading,error,onRetry}){if(loading)return <div className="initial-loading"><Spin/><span>正在读取…</span></div>;if(error)return <Result status={error.status===404?'404':error.status===403?'403':'error'} title={error.status===404?'没有找到这项内容':error.status===403?'没有访问权限':'暂时无法加载'} subTitle={error.message} extra={onRetry?<Button onClick={onRetry}>重试</Button>:<Button onClick={()=>navigate('/projects')}>返回项目</Button>}/>;return null;}
 export function PageHeading({title,description,extra}){return <div className="center-heading"><div><h1>{title}</h1>{description&&<p>{description}</p>}</div>{extra}</div>;}
@@ -106,11 +108,11 @@ export function SettingsPage({session}){
 function WorkspaceSettings({session}){
  const resource=useResource('/api/ai/status');
  return <div className="settings-page"><div className="page-eyebrow"><SettingOutlined/> 工作区管理</div><PageHeading title={isDemo?'演示与存储说明':'工作区设置'} description={isDemo?'查看演示能力、浏览器存储与规划来源。':'查看工作区的邮件与模型服务可用性，供部署管理员维护。'} extra={<Button onClick={()=>navigate('/account')}>个人设置</Button>}/>
- {!isDemo&&<Card title="账号邮件服务" className="settings-card"><Alert type={session.capabilities?.mailConfigured?'success':'warning'} showIcon title={session.capabilities?.mailConfigured?'已配置邮件服务':'邮件服务尚未配置，无法发送'} description="邮箱验证和密码找回依赖服务端邮件配置。未配置时，协作功能与使用现有密码登录不受影响。"/><p className="model-instructions">邮件服务由部署者维护，收件地址、发送凭据与邮件令牌不会显示在此页面。</p></Card>}
+ {!isDemo&&<><MailIntegration/><PlatformAIAdministration/></>}
  {isDemo&&<Card title="当前浏览器的数据" className="settings-card"><Alert type="info" showIcon title="不会同步到其他设备或其他浏览器" description="项目、成员档案、任务、里程碑和成果保存在此站点的 localStorage。清除站点数据或使用无痕窗口会失去这些修改；重置演示只恢复本演示的初始数据。"/><p className="model-instructions">可从项目页导出 Markdown 报告与 JSON 数据留档。上传文件每个最多 500 KB、累计 1 MB；重要成果建议保存到自己的文件或链接中。</p></Card>}
  <Card title={isDemo?'项目副驾与规划':'项目规划模型'} className="settings-card">
  {resource.loading?<Spin/>:resource.error?<Alert type={resource.error.status===403?'info':'warning'} showIcon title={resource.error.status===403?'模型配置由工作区管理员维护':resource.error.message}/>:resource.value?.samplePlanning?<Alert type="info" showIcon title="内置示例 · 非 AI 生成" description="规划与调整剩余计划会载入固定结构的示例草案。你可以编辑分工、日期、依赖、验收标准，先检查变更对比，再确认写入当前浏览器。不会调用外部模型或发送项目数据。"/>:<><Alert type={resource.value?.configured?'success':'warning'} showIcon title={resource.value?.configured?'已配置模型服务':'尚未配置模型，AI 规划暂不可用'}/><dl className="settings-details"><dt>提供方</dt><dd>{resource.value?.provider||'兼容 Chat Completions 的服务'}</dd><dt>模型</dt><dd>{resource.value?.model||'未设置'}</dd><dt>接口地址</dt><dd>{resource.value?.baseUrl||'未设置'}</dd></dl></>}
- <div className="model-instructions"><h3>与自己的 AI 一起制定计划</h3><p>进入项目的「项目副驾 → 与 AI 共建」，预览并复制项目上下文，在自己选择的 AI 中生成方案后导回。应用会校验原始项目版本、成员、日期和依赖；核对草案或变更对比后再确认应用。应用不会替你发送这些资料。</p><p>体检与项目简报由本地规则整理；简报编辑暂存在当前页面，离开前请复制或下载。</p></div>
+ <div className="model-instructions"><h3>与自己的 AI 一起制定计划</h3><p>进入项目的「项目副驾 → 与 AI 共建」，预览并复制项目上下文，在自己选择的 AI 中生成方案后导回。应用会校验原始项目版本、成员、日期和依赖；核对草案或变更对比后再确认应用。应用不会替你发送这些资料。</p><p>体检与项目简报由本地规则整理；简报支持当前账号在本浏览器保存 7 天草稿；也可复制或下载留档。</p></div>
  {!isDemo&&<div className="model-instructions"><h3>由部署管理员配置</h3><p>在服务端设置下列环境变量并重启服务，API 密钥不会返回浏览器。</p><code>COBUILD_AI_BASE_URL<br/>COBUILD_AI_API_KEY<br/>COBUILD_AI_MODEL</code><p>规划时会把项目目标、范围和成员信息发送给所配置的模型服务。未配置时可以手动建立里程碑与任务。</p><Button onClick={resource.refresh}>重新检查配置</Button></div>}
  </Card><div className="settings-footnote"><CheckCircleOutlined/> {isDemo?'成员与成果仅存当前浏览器。内置规划为固定示例；外部 AI 流程由你主动复制和导入。':'配置状态与权限由当前工作区提供；密钥内容不会显示在浏览器。'}</div></div>;
 }

@@ -12,6 +12,11 @@ import { peopleSummary, personDetails, projectWithProfiles } from './people.mjs'
 import { dashboardSummary } from './dashboard.mjs';
 import {deriveNotifications} from './notifications.mjs';
 import {createNotificationStore} from './notification-store.mjs';
+import {createAIServiceStore} from './ai-service-store.mjs';
+import {probeModel} from './model-probe.mjs';
+import {createTemplateStore} from './template-store.mjs';
+import {extractProjectTemplate,validateProjectTemplate,previewProjectTemplate,instantiateProjectTemplate,previewTaskBatch,applyTaskBatch} from './productivity.mjs';
+import {generateAssistance,applyActionDraft,buildAssistanceContext} from './assistance.mjs';
 import { buildSampleState, sampleProjectInput, markSampleState, isSampleState, sampleOwner, sampleInfo } from './sample.mjs';
 import { aiStatus, generatePlan, applyPlanDraft, applyMilestoneAction, reconcileMilestones, generateReplan, previewReplan, applyReplanDraft } from './planning.mjs';
 
@@ -96,16 +101,19 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
   // or syncProject can treat an orphan member as an unbound legacy profile.
   try { workspace = createWorkspace(dataDir, { seedDemo, operationCommitted:identity ? id=>identity.operationCommitted(id) : undefined }); }
   catch(error) { mailer.close();identity?.close(); throw error; }
-  let notifications,aiRequests;
+  let notifications,aiRequests,aiServices,templates;
+  const mailTests=new Map();
   try {
-    notifications=identity?createNotificationStore(dataDir):null;aiRequests=aiLimiter();
+    notifications=identity?createNotificationStore(dataDir):null;aiRequests=aiLimiter();aiServices=identity?createAIServiceStore(dataDir):null;templates=identity?createTemplateStore(dataDir):null;
     if (identity) for (const state of workspace.allStoredStates()) {
       const owner = isSampleState(state) ? identity.user(sampleOwner(state)) : null;
       if (isSampleState(state) && !owner) throw new Error('示例创建账号已不存在，请检查身份数据库');
       identity.syncProject(state, owner ? new Map([['m0',{personId:owner.personId,accessRole:'admin'}]]) : undefined);
     }
-  }catch(error){mailer.close();notifications?.close();identity?.close();throw error;}
+  }catch(error){mailer.close();notifications?.close();aiServices?.close();templates?.close();identity?.close();throw error;}
   const revision = () => workspace.view().revision + (identity?.revision() || 0);
+  const modelAccess=user=>aiServices?aiServices.access(user.id,{isAdmin:user.workspaceRole==='admin'}):{configured:aiStatus().configured,canGenerate:aiStatus().configured,source:'platform',remaining:null};
+  const reserveModel=user=>aiServices?aiServices.reserve(user.id,{isAdmin:user.workspaceRole==='admin'}):{source:'platform',env:process.env};
 
   function send(res, status, value, type = 'application/json; charset=utf-8', extra = {}) {
     res.writeHead(status, {'Content-Type':type,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer', ...extra});
@@ -237,8 +245,8 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
     const person = identity.person(personId);
     return person.accountLinked || user.workspaceRole === 'admin' ? person : visiblePerson(personId,user);
   }
-  function createProject(input,user) {
-    if (!authRequired) return workspace.create(input);
+  function createProject(input,user,options={}) {
+    if (!authRequired) return workspace.create(input,{decorate:options.decorate});
     const allowed = ['name','description','goal','deadline','ownerName','ownerRole','ownerPersonId','color','members'];
     if (Object.keys(input).some(key => !allowed.includes(key))) throw new AppError('包含不支持的项目字段');
     const ownerId = input.ownerPersonId ?? user.personId;
@@ -269,8 +277,25 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
         bindings.set(actorId,{personId:user.personId,accessRole:'admin'});
       }
       state.activities[0].actorId = actorId;
+      options.decorate?.(state,actorId);
     },persist(state,effect) { identity.syncProject(state,bindings,effect); }});
     return {state:decoratedState(result.state,user),workspace:workspaceView(user)};
+  }
+  function selectedTemplate(input,user){
+    if(Boolean(input.templateId)===Boolean(input.template))throw new AppError('请选择一个已保存模板或提供一个模板结构');
+    if(input.templateId){if(!templates)throw new AppError('模板库需要登录账号',403);const item=templates.get(user.id,input.templateId);if(item.archivedAt)throw new AppError('模板已归档，请先恢复',409);return item.template;}
+    return validateProjectTemplate(input.template);
+  }
+  function createFromTemplate(input,user){
+    if(Object.keys(input).some(key=>!['templateId','template','startDate','name','roleMap'].includes(key)))throw new AppError('从模板创建的字段不正确');
+    const template=selectedTemplate(input,user),start=input.startDate;
+    if(typeof start!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(start)||!Number.isFinite(Date.parse(start+'T00:00:00Z'))||new Date(start+'T00:00:00Z').toISOString().slice(0,10)!==start)throw new AppError('请选择有效的日程起点');
+    if(!plainObject(input.roleMap)||template.roles.some(role=>input.roleMap[role.id]!=='m0')||Object.keys(input.roleMap).length!==template.roles.length)throw new AppError('新项目的每个角色都须明确由创建者本人承担；创建后再邀请伙伴分工');
+    const deadline=template.project.deadlineOffset===null?'':new Date(Date.parse(start+'T00:00:00Z')+template.project.deadlineOffset*86400000).toISOString().slice(0,10);
+    return createProject({name:input.name,description:template.project.description,goal:template.project.goal,color:template.project.color,deadline},user,{decorate(state,actorId='m0'){
+      const members=state.members,next=instantiateProjectTemplate({...state,members:members.map(member=>({...member,accessRole:member.id===actorId?'admin':'member'}))},{actorId,expectedRevision:state.revision,template,startDate:start,roleMap:input.roleMap},{manageProject:true});
+      next.members=members;Object.assign(state,next);
+    }});
   }
   function archivedSample(state,archivedAt) {
     return {id:state.project.id,name:state.project.name,color:state.project.color,revision:state.revision,archivedAt,sample:{version:1,canRestore:true}};
@@ -453,6 +478,42 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
         return send(res,200,readFileSync(filePath),'application/octet-stream',{'Content-Disposition':`attachment; filename="artifact"; filename*=UTF-8''${encodeURIComponent(String(artifact.fileName).toWellFormed())}`});
       }
       if (req.method === 'POST' && pathname === '/api/projects') return send(res,201,createProject(await body(req),currentUser));
+      if(req.method==='GET'&&pathname==='/api/templates'){
+        if(!templates)throw new AppError('私有模板库需要登录账号',403);
+        const values=url.searchParams.getAll('archived');if(values.length>1||values.some(value=>!['true','false'].includes(value)))throw new AppError('模板筛选不正确');
+        return send(res,200,{templates:templates.list(currentUser.id,{archived:values[0]==='true'})});
+      }
+      if(req.method==='POST'&&pathname==='/api/templates'){
+        if(!templates)throw new AppError('私有模板库需要登录账号',403);
+        const input=await body(req,160*1024);if(Object.keys(input).length!==1||!input.template)throw new AppError('保存模板只接受已核对的模板结构');
+        return send(res,201,{template:templates.save(currentUser.id,input)});
+      }
+      if(req.method==='POST'&&['/api/templates/archive','/api/templates/restore'].includes(pathname)){
+        if(!templates)throw new AppError('私有模板库需要登录账号',403);
+        const input=await body(req,4096);return send(res,200,{template:pathname.endsWith('/archive')?templates.archive(currentUser.id,input):templates.restore(currentUser.id,input)});
+      }
+      if(req.method==='POST'&&pathname==='/api/templates/extract'){
+        const input=await body(req,4096);if(Object.keys(input).some(key=>!['projectId','name','anchorDate'].includes(key)))throw new AppError('模板提取字段不正确');
+        const context=access(input.projectId,currentUser,{manage:true});actingInput(input,context);
+        return send(res,200,{template:extractProjectTemplate(context.state,{name:input.name,anchorDate:input.anchorDate})});
+      }
+      if(req.method==='POST'&&pathname==='/api/templates/create'){
+        if(!templates)throw new AppError('从模板创建项目需要登录账号',403);
+        return send(res,201,createFromTemplate(await body(req,160*1024),currentUser));
+      }
+      if(req.method==='POST'&&['/api/templates/preview','/api/templates/apply'].includes(pathname)){
+        const input=await body(req,160*1024);if(Object.keys(input).some(key=>!['projectId','expectedRevision','templateId','template','startDate','roleMap'].includes(key)))throw new AppError('模板应用字段不正确');
+        const context=access(input.projectId,currentUser,{manage:true}),template=selectedTemplate(input,currentUser),{templateId,...request}=input,action=actingInput({...request,template},context);
+        if(pathname.endsWith('/preview'))return send(res,200,{preview:previewProjectTemplate(authorizedState(context),action,context.permissions)});
+        const next=instantiateProjectTemplate(authorizedState(context),action,context.permissions),saved=saveState(context.projectId,next);
+        return send(res,200,{state:decoratedState(saved,currentUser),workspace:workspaceView(currentUser)});
+      }
+      if(req.method==='POST'&&['/api/tasks/batch/preview','/api/tasks/batch'].includes(pathname)){
+        const input=await body(req,128*1024),context=access(input.projectId,currentUser,{write:true}),action=actingInput(input,context);
+        if(pathname.endsWith('/preview'))return send(res,200,{preview:previewTaskBatch(authorizedState(context),action,context.permissions)});
+        const next=applyTaskBatch(authorizedState(context),action,context.permissions),saved=saveState(context.projectId,next);
+        return send(res,200,{state:decoratedState(saved,currentUser)});
+      }
       if(req.method==='GET'&&pathname==='/api/members/impact') {
         if(!identity)throw new AppError('成员生命周期需要真实登录账号',403);
         const context=access(queryProjectId(),currentUser),ids=url.searchParams.getAll('memberId');
@@ -506,9 +567,57 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
         if (authRequired && currentUser.workspaceRole !== 'admin') throw new AppError('请由工作区管理员查看模型配置',403);
         return send(res,200,{...aiStatus(),limits:aiRequests.limits});
       }
+      if(req.method==='POST'&&pathname==='/api/account/ai/test'){
+        if(!aiServices)throw new AppError('模型连接测试需要登录账号',403);
+        const input=await body(req,4096);if(Object.keys(input).length)throw new AppError('连接测试只使用当前账号保存的配置');
+        const release=aiRequests.acquire(currentUser.id);try{const service=reserveModel(currentUser);return send(res,200,{...await probeModel(service.env),serviceSource:service.source});}finally{release();}
+      }
+      if(pathname==='/api/account/ai'||pathname==='/api/account/ai/clear'){
+        if(!aiServices)throw new AppError('个人模型配置需要登录账号',403);
+        if(req.method==='GET'&&pathname==='/api/account/ai')return send(res,200,modelAccess(currentUser));
+        if(req.method!=='POST')throw new AppError('不支持的请求方式',405);
+        const input=await body(req,16*1024);
+        if(pathname.endsWith('/clear'))aiServices.clearPersonal(currentUser.id,input);else aiServices.savePersonal(currentUser.id,input);
+        return send(res,200,modelAccess(currentUser));
+      }
+      if(pathname==='/api/admin/ai/access'){
+        if(!aiServices||currentUser.workspaceRole!=='admin')throw new AppError('请由工作区管理员维护平台额度',403);
+        if(req.method==='POST'){
+          const input=await body(req,4096);if(Object.keys(input).some(key=>!['accountId','enabled','limit','expectedRevision'].includes(key))||typeof input.accountId!=='string'||!identity.user(input.accountId))throw new AppError('请选择有效账号及额度');
+          const {accountId,...patch}=input;aiServices.grant(accountId,patch);
+        }else if(req.method!=='GET')throw new AppError('不支持的请求方式',405);
+        return send(res,200,{billing:'manual-entitlement',users:identity.accountsForAdministration().map(user=>({...user,platform:aiServices.platformAccess(user.id,{isAdmin:user.workspaceRole==='admin'})}))});
+      }
+      if(req.method==='GET'&&pathname==='/api/ai/access'){
+        const context=access(queryProjectId(),currentUser),service=modelAccess(currentUser);
+        return send(res,200,{...service,canGenerate:Boolean(service.canGenerate&&!context.permissions.readOnly&&context.actorId)});
+      }
+      if(req.method==='GET'&&pathname==='/api/admin/integrations'){
+        if(!identity||currentUser.workspaceRole!=='admin')throw new AppError('请由工作区管理员维护连接',403);
+        return send(res,200,{mail:mailer.diagnostics(),ai:{...aiStatus(),limits:aiRequests.limits}});
+      }
+      if(req.method==='POST'&&pathname==='/api/admin/mail/test'){
+        if(!identity||currentUser.workspaceRole!=='admin')throw new AppError('请由工作区管理员测试邮件',403);
+        const input=await body(req,4096);if(Object.keys(input).length)throw new AppError('测试邮件只发送到当前管理员本人邮箱，无需指定收件人');
+        if(!mailer.status().configured)throw mailUnavailable();
+        const now=Date.now(),previous=mailTests.get(currentUser.id),entry=previous&&now-previous.startedAt<600000?previous:{startedAt:now,calls:0,busy:false};
+        if(entry.busy||entry.calls>=3){const error=new AppError('邮件测试正在进行或已达每十分钟三次的上限，请稍后再试',429);error.retryAfter=Math.ceil((entry.startedAt+600000-now)/1000);throw error;}
+        entry.calls+=1;entry.busy=true;mailTests.set(currentUser.id,entry);
+        try{await mailer.sendTest({email:identity.account(currentUser.id).email,requestId:randomUUID()});return send(res,200,{accepted:true,deliveryVerified:false,message:'测试邮件已交给邮件服务，请到本人邮箱确认是否收到；本次不会验证邮箱或修改账号。'});}
+        finally{entry.busy=false;}
+      }
       if (req.method === 'GET' && pathname === '/api/ai/capabilities') {
-        const context = access(queryProjectId(),currentUser), configured = Boolean(aiStatus().configured);
+        const context = access(queryProjectId(),currentUser), configured = Boolean(modelAccess(currentUser).configured);
         return send(res,200,{configured,samplePlanning:false,canGenerate:Boolean(context.permissions.manageProject && configured)});
+      }
+      if(req.method==='POST'&&['/api/ai/assistance','/api/assistance/apply'].includes(pathname)){
+        const input=await body(req,256*1024),context=access(input.projectId,currentUser,{write:true}),action=actingInput(input,context),state=authorizedState(context);
+        if(pathname==='/api/assistance/apply'){
+          const next=applyActionDraft(state,action),saved=saveState(context.projectId,next);return send(res,200,{state:decoratedState(saved,currentUser)});
+        }
+        buildAssistanceContext(state,action);
+        const release=aiRequests.acquire(currentUser?.id||'isolated-legacy-test');
+        try{const service=reserveModel(currentUser),result=await generateAssistance(state,action,{env:service.env});return send(res,200,{...result,serviceSource:service.source});}finally{release();}
       }
       if (req.method === 'POST' && ['/api/ai/plan','/api/ai/replan','/api/plans/apply','/api/plans/preview','/api/plans/replan','/api/milestones/action'].includes(pathname)) {
         const input = await body(req), context = access(input.projectId,currentUser,{manage:true}), action = actingInput(input,context);
@@ -516,7 +625,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
           const {actorId,...request} = action;
           const generate = pathname === '/api/ai/replan' ? generateReplan : generatePlan;
           const release = aiRequests.acquire(currentUser?.id || 'isolated-legacy-test');
-          try { return send(res,200,await generate(authorizedState(context),request)); }
+          try { const service=reserveModel(currentUser);return send(res,200,{...await generate(authorizedState(context),request,{env:service.env}),serviceSource:service.source}); }
           finally { release(); }
         }
         if (pathname === '/api/plans/preview') return send(res,200,previewReplan(authorizedState(context),action));
@@ -570,9 +679,9 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       const publicDir = resolve(ROOT,'public'), file = resolve(publicDir,relative);
       if (!file.startsWith(`${publicDir}/`) || !existsSync(file) || !statSync(file).isFile()) throw new AppError('页面或文件不存在',404);
       send(res,200,req.method === 'HEAD' ? '' : readFileSync(file),TYPES[extname(file)] || 'application/octet-stream',{'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});
-    } catch (error) { send(res,error.status || 500,{error:error.status ? error.message : '服务处理失败，请查看服务日志',...(['DUPLICATE_PERSON_NAME','EMAIL_TAKEN','NAME_TAKEN','MAIL_NOT_CONFIGURED','MAIL_DELIVERY_FAILED','TOKEN_INVALID','CURRENT_PASSWORD_INVALID','CREDENTIALS_CHANGED','LAST_PROJECT_ADMIN','MEMBER_HAS_RESPONSIBILITIES','PROJECT_REVISION_CONFLICT'].includes(error.code)?{code:error.code}:{}),...(['email','name','currentPassword'].includes(error.field)?{field:error.field}:{})},undefined,error.retryAfter ? {'Retry-After':String(error.retryAfter)} : {}); if (!error.status) process.stderr.write(`${error.stack}\n`); }
+    } catch (error) { send(res,error.status || 500,{error:error.status ? error.message : '服务处理失败，请查看服务日志',...(['DUPLICATE_PERSON_NAME','EMAIL_TAKEN','NAME_TAKEN','MAIL_NOT_CONFIGURED','MAIL_DELIVERY_FAILED','TOKEN_INVALID','CURRENT_PASSWORD_INVALID','CREDENTIALS_CHANGED','LAST_PROJECT_ADMIN','MEMBER_HAS_RESPONSIBILITIES','PROJECT_REVISION_CONFLICT','AI_ACCESS_REQUIRED'].includes(error.code)?{code:error.code}:{}),...(['email','name','currentPassword'].includes(error.field)?{field:error.field}:{})},undefined,error.retryAfter ? {'Retry-After':String(error.retryAfter)} : {}); if (!error.status) process.stderr.write(`${error.stack}\n`); }
   });
-  server.on('close',() => {mailer.close();identity?.close();notifications?.close();});
+  server.on('close',() => {mailer.close();identity?.close();notifications?.close();aiServices?.close();templates?.close();});
   return server;
 }
 

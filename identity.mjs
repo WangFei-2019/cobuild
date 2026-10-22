@@ -300,6 +300,7 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
       });
     },
     user, onboarding,account:accountView,
+    accountsForAdministration(){return all('SELECT id FROM accounts ORDER BY createdAt,id').map(row=>{const current=user(row.id);return {id:current.id,name:current.name,workspaceRole:current.workspaceRole};});},
     updateAccount(accountId,patch) {
       const fields=profileFields(patch,{partial:true});
       return transaction(()=>{

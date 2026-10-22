@@ -104,6 +104,23 @@ test('release paths reject traversal, hidden state and env files while allowing 
   for (const path of ['.env.example','server.mjs','dashboard.mjs','src/main.jsx','scripts/doctor.mjs','.github/workflows/ci.yml']) assert.equal(isReleaseFile(path),true,path);
 });
 
+test('container receives the SMTP build source and uses the rebuilt locked runtime; both Compose variants forward optional SMTP secrets',()=>{
+  const root=fileURLToPath(new URL('../',import.meta.url)),read=path=>readFileSync(join(root,path),'utf8');
+  const docker=read('Dockerfile'),ignore=read('.dockerignore'),build=read('scripts/build.mjs');
+  assert.match(build,/entryPoints:\['scripts\/smtp-source\.mjs'\]/);
+  assert.match(docker,/COPY scripts\/build\.mjs scripts\/licenses\.mjs scripts\/smtp-source\.mjs \.\/scripts\//);
+  assert.match(ignore,/^!scripts\/smtp-source\.mjs$/m);assert.ok(REQUIRED_RELEASE_FILES.includes('scripts/smtp-source.mjs'));
+  assert.match(docker,/COPY --from=build --chown=node:node \/build\/smtp-transport\.mjs \.\/smtp-transport\.mjs/);
+  const dependency=JSON.parse(read('package.json')).dependencies.nodemailer;assert.match(dependency,/^\d+\.\d+\.\d+$/);assert.ok(read('pnpm-lock.yaml').includes(`nodemailer@${dependency}:`));
+  for(const path of ['compose.yaml','compose.registry.yaml']){
+    const compose=read(path);assert.ok(compose.includes('COBUILD_MAIL_TRANSPORT: ${COBUILD_MAIL_TRANSPORT:-resend}'),path);
+    assert.ok(compose.includes('COBUILD_MAIL_SMTP_HOST: ${COBUILD_MAIL_SMTP_HOST:-smtp.qq.com}'),path);assert.ok(compose.includes('COBUILD_MAIL_SMTP_PORT: ${COBUILD_MAIL_SMTP_PORT:-465}'),path);assert.ok(compose.includes('COBUILD_MAIL_SMTP_USER: ${COBUILD_MAIL_SMTP_USER:-}'),path);
+    assert.ok(compose.includes('COBUILD_MAIL_SMTP_PASSWORD_FILE: /run/secrets/mail_smtp_password'),path);assert.ok(compose.includes('file: ${COBUILD_MAIL_SMTP_PASSWORD_FILE:-./.secrets/mail_smtp_password}'),path);
+    const app=compose.split('  proxy:')[0];assert.match(app,/secrets:[\s\S]*\bmail_smtp_password\b/,path);assert.ok(compose.includes('COBUILD_MAIL_API_KEY_FILE: /run/secrets/mail_api_key'),path);
+    assert.equal(/^\s+COBUILD_MAIL_SMTP_PASSWORD:/m.test(compose),false,'SMTP authorization must use secret file, not inline value');
+  }
+});
+
 test('Pages service entry and explicit demo use relative URLs versioned by their actual assets',()=>{
   const root = fileURLToPath(new URL('../',import.meta.url));
   const build = spawnSync(process.execPath,['scripts/build-pages.mjs'],{cwd:root,encoding:'utf8'});

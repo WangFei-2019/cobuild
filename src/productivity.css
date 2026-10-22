@@ -1,0 +1,21 @@
+.productivity-modal .ant-alert{margin-bottom:16px}
+.productivity-modal h3{font-size:15px;margin:22px 0 12px}
+.productivity-field{display:flex;flex-direction:column;gap:8px;margin:18px 0;font-weight:500}
+.productivity-field small,.productivity-muted,.productivity-role small{font-size:12px;font-weight:400;color:var(--text-secondary,#64748b)}
+.productivity-two-columns{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:0 18px}
+.productivity-batch-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:20px 0}
+.productivity-batch-fields>label{display:flex;flex-direction:column;gap:10px}
+.productivity-batch-fields small{color:var(--text-secondary,#64748b);font-size:12px;line-height:1.6}
+.productivity-role{display:grid;grid-template-columns:minmax(140px,1fr) minmax(200px,2fr);gap:14px;align-items:center;margin:12px 0}
+.productivity-role small{display:block}
+.productivity-json{margin:24px 0 10px;border-top:1px solid var(--border-color,#e5e7eb);padding-top:16px}
+.productivity-json summary{cursor:pointer;font-weight:500}
+.productivity-json p,.productivity-modal td p{margin:5px 0;line-height:1.7}
+.productivity-json textarea{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.7}
+.productivity-stage-list{display:grid;gap:10px;margin-top:14px}
+.productivity-stage-list article{border-left:3px solid var(--primary-color,#28577b);background:var(--surface-secondary,#f8fafc);padding:10px 14px}
+.productivity-stage-list p{margin:5px 0;white-space:pre-wrap}
+.productivity-template-list{display:grid;gap:12px}
+.productivity-template-list article{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:14px;border:1px solid var(--border-color,#e5e7eb);border-radius:8px}
+.productivity-template-list p{font-size:13px;margin:6px 0 0;color:var(--text-secondary,#64748b)}
+@media(max-width:680px){.productivity-batch-fields{grid-template-columns:1fr}.productivity-role{grid-template-columns:1fr;gap:7px}.productivity-template-list article{align-items:flex-start;flex-direction:column}.productivity-modal .ant-modal-footer .ant-space{display:flex;flex-wrap:wrap;justify-content:flex-end}}

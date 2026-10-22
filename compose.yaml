@@ -11,6 +11,11 @@ services:
       COBUILD_SETUP_TOKEN_FILE: /run/secrets/setup_token
       COBUILD_AI_API_KEY_FILE: /run/secrets/ai_api_key
       COBUILD_MAIL_API_KEY_FILE: /run/secrets/mail_api_key
+      COBUILD_MAIL_TRANSPORT: ${COBUILD_MAIL_TRANSPORT:-resend}
+      COBUILD_MAIL_SMTP_HOST: ${COBUILD_MAIL_SMTP_HOST:-smtp.qq.com}
+      COBUILD_MAIL_SMTP_PORT: ${COBUILD_MAIL_SMTP_PORT:-465}
+      COBUILD_MAIL_SMTP_USER: ${COBUILD_MAIL_SMTP_USER:-}
+      COBUILD_MAIL_SMTP_PASSWORD_FILE: /run/secrets/mail_smtp_password
       COBUILD_MAIL_FROM: ${COBUILD_MAIL_FROM:-}
       COBUILD_MAIL_API_URL: ${COBUILD_MAIL_API_URL:-https://api.resend.com/emails}
       COBUILD_MAIL_TIMEOUT_MS: ${COBUILD_MAIL_TIMEOUT_MS:-8000}
@@ -25,6 +30,7 @@ services:
       - setup_token
       - ai_api_key
       - mail_api_key
+      - mail_smtp_password
     volumes:
       - cobuild_data:/app/.local
     expose:
@@ -52,6 +58,8 @@ secrets:
     file: ./.secrets/ai_api_key
   mail_api_key:
     file: ./.secrets/mail_api_key
+  mail_smtp_password:
+    file: ${COBUILD_MAIL_SMTP_PASSWORD_FILE:-./.secrets/mail_smtp_password}
 volumes:
   cobuild_data:
   caddy_data:

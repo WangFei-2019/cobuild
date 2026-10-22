@@ -17,6 +17,7 @@
 !scripts/backup.mjs
 !scripts/build.mjs
 !scripts/licenses.mjs
+!scripts/smtp-source.mjs
 # Defence in depth for accidental local files inside source directories.
 **/.env
 **/.env.*
