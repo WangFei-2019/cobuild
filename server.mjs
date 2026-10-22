@@ -94,7 +94,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
     if (!plainObject(input)) throw new AppError('请求格式不正确');
     return input;
   }
-  const sessionView = user => ({ setupRequired:identity?.setupRequired() || false, setupTokenRequired:Boolean(identity?.setupRequired() && (remoteDeployment || setupToken)), registrationEnabled:Boolean(identity && !identity.setupRequired()), user });
+  const sessionView = user => ({ setupRequired:identity?.setupRequired() || false, setupTokenRequired:Boolean(identity?.setupRequired() && (remoteDeployment || setupToken)), registrationEnabled:Boolean(identity && !identity.setupRequired()), user, onboarding:user && identity ? identity.onboarding(user.id) : null });
   const sessionCookie = (token, expired = false) => `${COOKIE}=${expired ? '' : token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${expired ? 0 : 604800}${secureCookie ? '; Secure' : ''}`;
   function cookieToken(req) {
     return (req.headers.cookie || '').split(';').map(value => value.trim()).find(value => value.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1) || '';
@@ -243,8 +243,13 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       if (req.method === 'GET' && pathname === '/api/auth/session') return send(res,200,sessionView(currentUser));
       if (req.method === 'POST' && pathname.startsWith('/api/auth/')) {
         if (!identity) throw new AppError('测试兼容模式不提供账号接口',404);
+        if (pathname === '/api/auth/onboarding' && !currentUser) throw new AppError('请先登录工作区',401);
         const input = await body(req,16 * 1024);
         if (pathname === '/api/auth/logout') { identity.logout(token); return send(res,200,sessionView(null),undefined,{'Set-Cookie':sessionCookie('',true)}); }
+        if (pathname === '/api/auth/onboarding') {
+          if (Object.keys(input).length !== 1 || !Object.hasOwn(input,'status')) throw new AppError('指引设置仅支持当前账号的status字段');
+          return send(res,200,{onboarding:identity.updateOnboarding(currentUser.id,input.status)});
+        }
         let result;
         if (pathname === '/api/auth/setup') {
           if (remoteDeployment || setupToken) {

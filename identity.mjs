@@ -43,6 +43,7 @@ export function createIdentity(dataDir) {
     CREATE TABLE IF NOT EXISTS people(id TEXT PRIMARY KEY,name TEXT NOT NULL,color TEXT NOT NULL,initial TEXT NOT NULL,bio TEXT NOT NULL DEFAULT '',createdAt TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY,email TEXT NOT NULL UNIQUE,personId TEXT NOT NULL UNIQUE REFERENCES people(id),passwordSalt TEXT NOT NULL,passwordHash TEXT NOT NULL,workspaceRole TEXT NOT NULL,createdAt TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sessions(tokenHash TEXT PRIMARY KEY,accountId TEXT NOT NULL REFERENCES accounts(id),createdAt TEXT NOT NULL,expiresAt TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS account_onboarding(accountId TEXT NOT NULL REFERENCES accounts(id),version INTEGER NOT NULL,status TEXT NOT NULL CHECK(status IN ('dismissed','completed')),updatedAt TEXT NOT NULL,PRIMARY KEY(accountId,version));
     CREATE TABLE IF NOT EXISTS project_members(projectId TEXT NOT NULL,memberId TEXT NOT NULL,personId TEXT NOT NULL REFERENCES people(id),accessRole TEXT NOT NULL,PRIMARY KEY(projectId,memberId),UNIQUE(projectId,personId));
     CREATE TABLE IF NOT EXISTS invitations(id TEXT PRIMARY KEY,tokenHash TEXT NOT NULL UNIQUE,projectId TEXT NOT NULL,memberId TEXT,personId TEXT REFERENCES people(id),email TEXT NOT NULL DEFAULT '',accessRole TEXT NOT NULL,createdBy TEXT NOT NULL REFERENCES accounts(id),createdAt TEXT NOT NULL,expiresAt TEXT NOT NULL,status TEXT NOT NULL,acceptedBy TEXT REFERENCES accounts(id),acceptedAt TEXT);
     CREATE TABLE IF NOT EXISTS login_attempts(key TEXT PRIMARY KEY,count INTEGER NOT NULL,windowStart INTEGER NOT NULL);`);
@@ -81,6 +82,11 @@ export function createIdentity(dataDir) {
   function user(accountId) {
     const value = get('SELECT a.id,a.email,a.personId,a.workspaceRole,p.name FROM accounts a JOIN people p ON p.id=a.personId WHERE a.id=?', accountId);
     return value ? { ...value } : null;
+  }
+  function onboarding(accountId) {
+    if (!user(accountId)) throw new AppError('没有找到当前账号', 404);
+    const value = get('SELECT status FROM account_onboarding WHERE accountId=? AND version=1', accountId);
+    return { version: 1, status: value?.status || 'pending' };
   }
   function session(accountId) {
     const token = randomBytes(32).toString('base64url');
@@ -189,7 +195,17 @@ export function createIdentity(dataDir) {
         bump(); return person(personId);
       });
     },
-    user,
+    user, onboarding,
+    updateOnboarding(accountId, status) {
+      if (!['dismissed','completed'].includes(status)) throw new AppError('指引状态只支持dismissed或completed');
+      return transaction(() => {
+        const current = onboarding(accountId);
+        // A delayed dismissal from another tab must not undo completion.
+        if (current.status === 'completed' || current.status === status) return current;
+        run('INSERT INTO account_onboarding(accountId,version,status,updatedAt) VALUES(?,1,?,?) ON CONFLICT(accountId,version) DO UPDATE SET status=excluded.status,updatedAt=excluded.updatedAt', accountId, status, now());
+        return { version: 1, status };
+      });
+    },
     sessionUser(token) {
       if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
       const value = get('SELECT accountId,expiresAt FROM sessions WHERE tokenHash=?', hash(token));

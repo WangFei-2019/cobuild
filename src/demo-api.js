@@ -9,6 +9,9 @@ export const DEMO_STORAGE_KEY = 'cobuild.pages.demo.v1';
 export const DEMO_MODEL = '内置示例 · 非AI生成';
 const FILE_LIMIT = 500 * 1024, FILES_LIMIT = 1024 * 1024;
 const clone = value => structuredClone(value);
+const ONBOARDING_VERSION = 1;
+const onboardingState = doc => clone(doc.onboarding || {version:ONBOARDING_VERSION,status:'pending'});
+const validOnboarding = value => record(value) && Object.keys(value).length === 2 && value.version === ONBOARDING_VERSION && ['pending','dismissed','completed'].includes(value.status);
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const unavailable = () => { const error = new AppError('静态演示不提供真实账号、邀请或多人同步，请使用服务端版本。', 501); error.code = 'DEMO_UNAVAILABLE'; throw error; };
 function text(value, label, max, required = false) {
@@ -27,7 +30,8 @@ function dataShape(value) {
     && value.projects.every(state => state?.schemaVersion === 1 && state.project?.id && Number.isSafeInteger(state.revision)
       && ['members', 'tasks', 'activities', 'decisions'].every(key => Array.isArray(state[key])))
     && value.projects.some(state => state.project.id === value.defaultProjectId)
-    && value.people.some(person => person.id === value.currentPersonId);
+    && value.people.some(person => person.id === value.currentPersonId)
+    && (!Object.hasOwn(value,'onboarding') || validOnboarding(value.onboarding));
 }
 
 /** Explicit, browser-only demo repository. Never called as a server/network fallback. */
@@ -40,6 +44,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
   function fresh() {
     const doc = clone(seed), at = now(), dayParts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(at);
     const parts = Object.fromEntries(dayParts.map(part => [part.type, part.value]));
+    doc.onboarding = {version:ONBOARDING_VERSION,status:'pending'};
     const today = `${parts.year}-${parts.month}-${parts.day}`;
     const shifted = offset => { const value = new Date(`${today}T00:00:00Z`); value.setUTCDate(value.getUTCDate() + offset); return value.toISOString().slice(0, 10); };
     for (const state of doc.projects) {
@@ -84,7 +89,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     const person = identity(doc).person(doc.currentPersonId);
     return { id: 'demo-experience-session', name: person.name, email: 'demo@local.invalid', personId: person.id, workspaceRole: 'admin', demo: true };
   }
-  const session = doc => ({ setupRequired: false, setupTokenRequired: false, demo: true, user: user(doc) });
+  const session = doc => ({ setupRequired: false, setupTokenRequired: false, demo: true, user: user(doc), onboarding:onboardingState(doc) });
   function stateFor(doc, projectId) {
     const id = projectId === undefined ? doc.defaultProjectId : projectId;
     if (typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(id)) throw new AppError('项目标识不正确');
@@ -234,7 +239,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     const doc = load(), adapter = identity(doc), current = user(doc), input = payload || {};
     const ids = url.searchParams.getAll('projectId'); if (ids.length > 1) throw new AppError('请只指定一个项目');
     const projectId = payload === undefined ? (ids.length ? ids[0] : undefined) : input.projectId;
-    if (path.startsWith('/api/invitations') || (path.startsWith('/api/auth/') && !['/api/auth/session', '/api/auth/logout'].includes(path))) unavailable();
+    if (path.startsWith('/api/invitations') || (path.startsWith('/api/auth/') && !['/api/auth/session', '/api/auth/logout', '/api/auth/onboarding'].includes(path))) unavailable();
     if (payload === undefined) {
       if (path === '/api/auth/session') return session(doc);
       if (path === '/api/health') return { ok: true, demo: true, app: 'cobuild', authRequired: false };
@@ -253,6 +258,15 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
       throw new AppError('演示接口不存在', 404);
     }
     if (path === '/api/auth/logout') return session(doc);
+    if (path === '/api/auth/onboarding') {
+      if (Object.keys(input).length !== 1 || !Object.hasOwn(input,'status') || !['dismissed','completed'].includes(input.status)) throw new AppError('使用指引仅支持当前体验账号的 dismissed 或 completed 状态');
+      const previous = onboardingState(doc);
+      if (previous.status !== 'completed' && previous.status !== input.status) {
+        doc.onboarding = {version:ONBOARDING_VERSION,status:input.status};
+        persist(doc);
+      }
+      return {onboarding:onboardingState(doc)};
+    }
     if (path === '/api/people') return writePerson(doc,input);
     if (/^\/api\/people\/[A-Za-z0-9_-]+$/.test(path)) return writePerson(doc,input,path.split('/').at(-1));
     if (path === '/api/projects') return createProject(doc, input);

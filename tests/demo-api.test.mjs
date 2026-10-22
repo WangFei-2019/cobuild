@@ -115,3 +115,49 @@ test('存储配额失败保留旧数据，损坏数据不被静默覆盖，显�
   assert.equal((await demo.request('/api/auth/session')).demo, true);
   assert.equal(storage.values.get('unrelated-real-app-key'), 'must stay untouched');
 });
+
+test('演示指引兼容旧数据、跨适配器持久化且完成为终态，不改变项目或工作区版本', async t => {
+  t.mock.method(globalThis,'fetch',()=>{throw new Error('onboarding must stay local');});
+  const storage=memoryStorage(),demo=createDemoAPI({storage,now:time});
+  assert.deepEqual((await demo.request('/api/auth/session')).onboarding,{version:1,status:'pending'});
+  const legacy=JSON.parse(storage.values.get(DEMO_STORAGE_KEY)); delete legacy.onboarding;
+  const legacyBytes=JSON.stringify(legacy); storage.values.set(DEMO_STORAGE_KEY,legacyBytes);
+  assert.deepEqual((await demo.request('/api/auth/session')).onboarding,{version:1,status:'pending'});
+  assert.equal(storage.values.get(DEMO_STORAGE_KEY),legacyBytes,'reading legacy state must not rewrite project data');
+  const before=await demo.request('/api/workspace'),projects=await Promise.all(before.projects.map(project=>demo.request('/api/state?projectId='+project.id)));
+  assert.deepEqual(await demo.request('/api/auth/onboarding',{status:'dismissed'}),{onboarding:{version:1,status:'dismissed'}});
+  const reopened=createDemoAPI({storage,now:time});
+  assert.deepEqual((await reopened.request('/api/auth/session')).onboarding,{version:1,status:'dismissed'});
+  const dismissedBytes=storage.values.get(DEMO_STORAGE_KEY);
+  await reopened.request('/api/auth/onboarding',{status:'dismissed'});
+  assert.equal(storage.values.get(DEMO_STORAGE_KEY),dismissedBytes,'idempotent dismissal must not write');
+  assert.deepEqual(await reopened.request('/api/auth/onboarding',{status:'completed'}),{onboarding:{version:1,status:'completed'}});
+  const completedBytes=storage.values.get(DEMO_STORAGE_KEY);
+  for(const status of ['completed','dismissed'])assert.deepEqual(await demo.request('/api/auth/onboarding',{status}),{onboarding:{version:1,status:'completed'}});
+  assert.equal(storage.values.get(DEMO_STORAGE_KEY),completedBytes,'completed cannot be downgraded or rewritten');
+  assert.deepEqual((await reopened.request('/api/auth/logout',{})).onboarding,{version:1,status:'completed'});
+  assert.deepEqual(await reopened.request('/api/workspace'),before);
+  for(let i=0;i<projects.length;i++)assert.deepEqual(await reopened.request('/api/state?projectId='+projects[i].project.id),projects[i]);
+  const reset=await reopened.request('/api/demo/reset',{});
+  assert.deepEqual(reset.onboarding,{version:1,status:'pending'});
+  assert.equal(storage.values.get('unrelated-real-app-key'),'must stay untouched');
+});
+
+test('演示指引严格限定当前本机体验身份，存储失败保留原状态且不伪造保存成功', async () => {
+  const storage=memoryStorage(),demo=createDemoAPI({storage,now:time});
+  const session=await demo.request('/api/auth/session'),before=storage.values.get(DEMO_STORAGE_KEY);
+  for(const payload of [{},{status:'pending'},{status:'unknown'},{status:'completed',accountId:'someone-else'},{status:'completed',personId:session.user.personId},{status:'completed',version:2},null,[]]) {
+    await assert.rejects(demo.request('/api/auth/onboarding',payload),error=>error.status===400);
+    assert.equal(storage.values.get(DEMO_STORAGE_KEY),before);
+  }
+  await assert.rejects(demo.request('/api/auth/onboarding'),error=>error.status===404);
+  const originalSet=storage.setItem; storage.setItem=()=>{throw new DOMException('quota','QuotaExceededError');};
+  await assert.rejects(demo.request('/api/auth/onboarding',{status:'completed'}),error=>error.status===507);
+  assert.equal(storage.values.get(DEMO_STORAGE_KEY),before);
+  assert.deepEqual((await demo.request('/api/auth/session')).onboarding,{version:1,status:'pending'});
+  storage.setItem=originalSet;
+  await demo.request('/api/auth/onboarding',{status:'completed'});
+  storage.setItem=()=>{throw new DOMException('quota','QuotaExceededError');};
+  assert.deepEqual(await demo.request('/api/auth/onboarding',{status:'dismissed'}),{onboarding:{version:1,status:'completed'}},'idempotent terminal updates need no storage write');
+  assert.equal((await demo.request('/api/auth/session')).user.id,session.user.id);
+});

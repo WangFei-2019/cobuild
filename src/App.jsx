@@ -3,6 +3,8 @@ import {App as AntApp,Avatar,Button,Card,Drawer,Dropdown,Empty,Input,Progress,Re
 import {AppstoreOutlined,DashboardOutlined,SearchOutlined,ArrowRightOutlined,CheckCircleOutlined,ClockCircleOutlined,FlagOutlined,MenuOutlined,EllipsisOutlined,LogoutOutlined,PlusOutlined,ProjectOutlined,SettingOutlined,TeamOutlined,UserOutlined} from '@ant-design/icons';
 import {api,isDemo,avatarInitial,dateLabel,safeColor,contrastColor,shanghaiDay} from './lib.js';
 import Dashboard from './dashboard.jsx';
+import OnboardingGuide from './onboarding.jsx';
+import {canAutoOpenGuide,mergeOnboardingSession} from './onboarding-model.js';
 import {authHref,migrateLegacyURL,navigate,parseRoute,routeHref,routeURL,safeNextPath,setNavigationGuard,useRoute} from './router.js';
 import {Person} from './shared.jsx';
 import {NewProjectModal} from './project-components.jsx';
@@ -15,6 +17,7 @@ export default function Application(){
  useEffect(()=>{window.scrollTo(0,0);},[route.kind,route.projectId,route.personId,route.tab]);
  useEffect(()=>{if(route.kind!=='project')document.title=`${({dashboard:'我的工作台',projects:'项目中心',people:'人员目录',person:'人员主页',settings:isDemo?'演示与存储说明':'工作区设置',login:'登录',register:'注册账号',setup:'首次设置',invite:'项目邀请','404':'页面不存在'})[route.kind]||'共建'} · 共建`;},[route.kind]);
  async function loadSession(){try{setSession(await api('/api/auth/session'));setSessionError(null);}catch(error){setSessionError(error);}}
+ function saveGuideStatus(accountId,onboarding){setSession(current=>mergeOnboardingSession(current,accountId,onboarding));}
  useEffect(()=>{loadSession();},[]);
  useEffect(()=>{if(!session||isDemo)return;const url=routeURL(),authRoute=['login','register','setup'].includes(route.kind),next=safeNextPath(route.next,authRoute?'/dashboard':safeNextPath(url.pathname+url.search));if(session.setupRequired&&route.kind!=='setup')navigate(authHref('setup',next),{replace:true});else if(!session.setupRequired&&!session.user&&!['login','register','invite'].includes(route.kind))navigate(authHref('login',next),{replace:true});else if(!session.user&&route.kind==='register'&&parseRoute(new URL(next,location.origin)).kind==='invite')navigate(next,{replace:true});else if(session.user&&authRoute)navigate(next,{replace:true});},[session,route.kind,route.next,route.token]);
  async function logout(){try{const result=await api('/api/auth/logout',{});setNavigationGuard(null);setSession(result);navigate(route.kind==='invite'?`/invite/${encodeURIComponent(route.token)}`:'/login',{replace:true});}catch(error){message.error(error.message);}}
@@ -27,13 +30,23 @@ export default function Application(){
  if(route.kind==='register'){if(parseRoute(new URL(safeNextPath(route.next),location.origin)).kind==='invite')return <div className="initial-loading"><Spin/><span>正在核对项目邀请…</span></div>;return <AuthPage key="register" mode="register" session={session} next={route.next} onAuth={setSession}/>;}
  if(route.kind==='invite')return <InvitePage token={route.token} session={session} onAuth={setSession} onLogout={logout}/>;
  if(!session.user)return <div className="initial-loading"><Spin/></div>;
- return <Workspace key={demoEpoch} session={session} route={route} onLogout={logout} onSessionExpired={loadSession} onDemoReset={()=>setDemoEpoch(value=>value+1)}/>;
+ return <Workspace key={`${demoEpoch}:${session.user.id}`} session={session} route={route} onLogout={logout} onSessionExpired={loadSession} onGuideStatus={saveGuideStatus} onDemoReset={()=>setDemoEpoch(value=>value+1)}/>;
 }
-function Workspace({session,route,onLogout,onSessionExpired,onDemoReset}){
+function Workspace({session,route,onLogout,onSessionExpired,onGuideStatus,onDemoReset}){
  const {message,modal}=AntApp.useApp(),[workspace,setWorkspace]=useState(null),[error,setError]=useState(null),[createOpen,setCreateOpen]=useState(false);
  const createDirty=useRef(false),alive=useRef(true),refreshing=useRef(false);const [mobileNavOpen,setMobileNavOpen]=useState(false);
+ const [guideOpen,setGuideOpen]=useState(false),guideSeen=useRef(false);
  async function refresh(){if(refreshing.current)return;refreshing.current=true;try{const result=await api('/api/workspace');if(!alive.current)return;setWorkspace(result);setError(null);}catch(err){if(!alive.current)return;setError(err);if(err.status===401)onSessionExpired();}finally{refreshing.current=false;}}
  useEffect(()=>{alive.current=true;refresh();const timer=setInterval(refresh,5000);return()=>{alive.current=false;clearInterval(timer);};},[]);
+ useEffect(()=>{
+  if(guideSeen.current||guideOpen||!workspace||error||createOpen||mobileNavOpen||(session.onboarding?.status||'pending')!=='pending'||!canAutoOpenGuide(route))return;
+  let timer;const offer=()=>{
+   const activeDialog=[...document.querySelectorAll('[role="dialog"][aria-modal="true"]')].some(element=>element.getClientRects().length);
+   if(document.visibilityState==='hidden'||activeDialog||document.activeElement?.matches('input,textarea,[contenteditable="true"]')){timer=setTimeout(offer,800);return;}
+   guideSeen.current=true;setGuideOpen(true);
+  };
+  timer=setTimeout(offer,450);return()=>clearTimeout(timer);
+ },[Boolean(workspace),error,guideOpen,createOpen,mobileNavOpen,session.onboarding?.status,route.kind,route.tab,route.taskId]);
  useEffect(()=>{const cleanup=setNavigationGuard(()=>{if(!createDirty.current)return true;if(!window.confirm('新项目表单尚未保存，确定放弃并离开？'))return false;createDirty.current=false;setCreateOpen(false);return true;});const beforeUnload=event=>{if(createDirty.current){event.preventDefault();event.returnValue='';}};window.addEventListener('beforeunload',beforeUnload);return()=>{cleanup();window.removeEventListener('beforeunload',beforeUnload);};},[]);
  async function create(values){const {inviteAfterCreate,...projectValues}=values;try{const result=await api('/api/projects',{...projectValues,ownerName:session.user.name,ownerPersonId:session.user.personId});setWorkspace(result.workspace);createDirty.current=false;navigate(routeHref(result.state.project.id,inviteAfterCreate?'members':'overview'));message.success('项目已创建');return true;}catch(err){message.error(err.message);return false;}}
  function resetDemo(){modal.confirm({title:'重置当前浏览器的演示数据？',content:'你在此演示中创建的项目、成员、任务、文件和未保存草稿将清除，恢复初始示例。此操作无法撤销。',okText:'重置演示',okButtonProps:{danger:true},cancelText:'保留数据',onOk:async()=>{try{await api('/api/demo/reset',{});createDirty.current=false;setNavigationGuard(null);navigate('/dashboard',{replace:true});onDemoReset();message.success('已恢复演示示例');}catch(err){message.error(err.message);throw err;}}});}
@@ -49,13 +62,14 @@ function Workspace({session,route,onLogout,onSessionExpired,onDemoReset}){
  else if(route.kind==='person')content=<main className="workspace-main standalone-page"><PersonPage key={route.personId} personId={route.personId} session={session} onChanged={()=>{refresh();onSessionExpired();}}/></main>;
  else if(route.kind==='settings')content=<main className="workspace-main standalone-page"><SettingsPage session={session}/></main>;
  else content=<Result status="404" title="页面不存在" extra={<Button onClick={()=>navigate('/dashboard')}>返回工作台</Button>}/>;
- const menuItems=[...(isDemo?[{key:'formal',label:'进入正式工作区'}]:[]),{key:'settings',label:isDemo?'演示与存储说明':'模型与工作区设置'},{type:'divider'},isDemo?{key:'reset',label:'重置演示数据',danger:true}:{key:'logout',label:'退出登录',icon:<LogoutOutlined/>}];
+ const menuItems=[{key:'guide',label:'使用指引'},...(isDemo?[{key:'formal',label:'进入正式工作区'}]:[]),{key:'settings',label:isDemo?'演示与存储说明':'模型与工作区设置'},{type:'divider'},isDemo?{key:'reset',label:'重置演示数据',danger:true}:{key:'logout',label:'退出登录',icon:<LogoutOutlined/>}];
  return <div className={`space-layout${isDemo?' is-demo':''}`}>
 
  <aside className="project-sidebar"><WorkspaceNavigation workspace={workspace} route={route} user={session.user} onGo={go} onCreate={()=>setCreateOpen(true)} canCreate={canCreateProject} onLogout={onLogout} onReset={resetDemo}/></aside>
  <Drawer title="共建工作区" placement="left" open={mobileNavOpen} onClose={()=>setMobileNavOpen(false)} size={270} className="workspace-mobile-drawer" styles={{body:{padding:0}}}><WorkspaceNavigation workspace={workspace} route={route} user={session.user} onGo={go} onCreate={()=>{setMobileNavOpen(false);setCreateOpen(true);}} canCreate={canCreateProject} onLogout={onLogout} onReset={resetDemo}/></Drawer>
- <div className="space-content"><div className="space-topbar"><div className="space-breadcrumb"><Button className="mobile-navigation-toggle" type="text" icon={<MenuOutlined/>} aria-label="打开工作区导航" onClick={()=>setMobileNavOpen(true)}/><button onClick={()=>navigate('/projects')}>共建工作区</button><span className="breadcrumb-divider">/</span><strong>{project?.name||({dashboard:'我的工作台',projects:'项目中心',people:'人员目录',person:'人员主页',settings:isDemo?'演示与存储说明':'工作区设置'})[route.kind]||'项目'}</strong></div><div className="space-topbar-actions">{isDemo&&<Tooltip title="数据仅保存在当前浏览器，无异地同步；内置示例非 AI 生成，可手动导出上下文与外部 AI 共建。"><button className="demo-compact-badge" onClick={()=>navigate('/settings')}>演示 · 本机保存</button></Tooltip>}<Button className="global-search-button" icon={<SearchOutlined/>} aria-label="跨项目搜索任务" onClick={()=>navigate('/dashboard?search=1')}>搜索任务 <span className="search-hint">跨项目</span></Button><Button className="account-button" type="text" icon={<Avatar size={26} style={{background:safeColor('#397e70')}}>{avatarInitial(session.user)}</Avatar>} onClick={()=>navigate(`/people/${session.user.personId}`)}>{session.user.name}</Button><Dropdown menu={{items:menuItems,onClick:({key})=>{if(key==='formal')location.assign('./index.html');if(key==='settings')navigate('/settings');if(key==='logout')onLogout();if(key==='reset')resetDemo();}}}><Button icon={<EllipsisOutlined/>} aria-label="账号与工作区操作"/></Dropdown></div></div>{content}</div>
+ <div className="space-content"><div className="space-topbar"><div className="space-breadcrumb"><Button className="mobile-navigation-toggle" type="text" icon={<MenuOutlined/>} aria-label="打开工作区导航" onClick={()=>setMobileNavOpen(true)}/><button onClick={()=>navigate('/projects')}>共建工作区</button><span className="breadcrumb-divider">/</span><strong>{project?.name||({dashboard:'我的工作台',projects:'项目中心',people:'人员目录',person:'人员主页',settings:isDemo?'演示与存储说明':'工作区设置'})[route.kind]||'项目'}</strong></div><div className="space-topbar-actions">{isDemo&&<Tooltip title="数据仅保存在当前浏览器，无异地同步；内置示例非 AI 生成，可手动导出上下文与外部 AI 共建。"><button className="demo-compact-badge" onClick={()=>navigate('/settings')}>演示 · 本机保存</button></Tooltip>}<Button className="global-search-button" icon={<SearchOutlined/>} aria-label="跨项目搜索任务" onClick={()=>navigate('/dashboard?search=1')}>搜索任务 <span className="search-hint">跨项目</span></Button><Button className="account-button" type="text" icon={<Avatar size={26} style={{background:safeColor('#397e70')}}>{avatarInitial(session.user)}</Avatar>} onClick={()=>navigate(`/people/${session.user.personId}`)}>{session.user.name}</Button><Dropdown menu={{items:menuItems,onClick:({key})=>{if(key==='guide'){guideSeen.current=true;setMobileNavOpen(false);setGuideOpen(true);}if(key==='formal')location.assign('./index.html');if(key==='settings')navigate('/settings');if(key==='logout')onLogout();if(key==='reset')resetDemo();}}}><Button icon={<EllipsisOutlined/>} aria-label="账号与工作区操作"/></Dropdown></div></div>{content}</div>
  {createOpen&&<NewProjectModal ownerName={session.user.name} onCreate={create} onDirty={value=>{createDirty.current=value;}} onClose={()=>{if(!createDirty.current||window.confirm('放弃尚未保存的新项目表单？')){createDirty.current=false;setCreateOpen(false);}}}/>}
+ {guideOpen&&<OnboardingGuide user={session.user} workspace={workspace} preferredProjectId={route.projectId} onboarding={session.onboarding} onStatusSaved={value=>onGuideStatus(session.user.id,value)} onClose={()=>setGuideOpen(false)} onAction={action=>{if(action.kind==='create')setCreateOpen(true);else navigate(routeHref(action.projectId,action.tab));}}/>}
  </div>;
 }
 
