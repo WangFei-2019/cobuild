@@ -115,13 +115,17 @@ test('档案改名在两个项目和汇总一致显示，历史JSON及任务交�
   assert.equal(profile.projects.find(value => value.project.id === 'p1').role, target.role);
 });
 
-test('项目管理者只能选择公开账号的最小档案，精确人员邀请确认前不授权且不能被同名账号接受', async t => {
-  const { admin, register } = await fixture(t);
+test('项目管理者只能选择公开账号的最小档案，精确人员邀请确认前不授权且不能被历史同名账号接受', async t => {
+  const { admin, register, dataDir } = await fixture(t);
   const owner = await register('p1', 'owner@profile.test', '项目管理者');
   const owned = await owner.request('/api/projects', { name: '个人项目' }), projectId = owned.data.state.project.id;
   const secret = await admin('/api/projects', { name: '不得泄露的私有项目' });
   const target = await register(secret.data.state.project.id, 'target@profile.test', '同名用户');
-  const wrong = await register('p1', 'wrong@profile.test', '同名用户');
+  const wrong = await register('p1', 'wrong@profile.test', '另一位用户');
+  // Simulate an existing historical duplicate without permitting new duplicate
+  // registrations under the current nickname policy.
+  const legacyDb = new DatabaseSync(join(dataDir, 'identity.sqlite'));
+  legacyDb.prepare('UPDATE people SET name=? WHERE id=?').run('同名用户', wrong.user.personId); legacyDb.close();
   const privatePerson = (await admin('/api/people', { name: '未加入的私有档案' })).data.person;
   const regular = (await owner.request('/api/people')).data;
   assert.equal(regular.permissions.managePeople, false);

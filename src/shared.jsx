@@ -1,5 +1,5 @@
 import React,{useState} from 'react';
-import {App as AntApp,Avatar,Button,Card,Collapse,Divider,Empty,Grid,Input,Modal,Segmented,Select,Space,Table,Tag,Timeline,Tooltip,Typography} from 'antd';
+import {App as AntApp,Avatar,Button,Card,Collapse,Empty,Grid,Input,Segmented,Select,Space,Table,Tag,Timeline,Tooltip,Typography} from 'antd';
 import {AppstoreOutlined,ArrowRightOutlined,ClockCircleOutlined,EllipsisOutlined,ExportOutlined,FileOutlined,LinkOutlined,PlusOutlined,ProjectOutlined,TeamOutlined,WarningOutlined,EditOutlined} from '@ant-design/icons';
 import {STATUS,STATUS_COLOR,PRIORITY,PRIORITY_ORDER,isDemo,download,avatarInitial,safeColor,dateLabel,timeLabel,safeURL,canManage,canCreate,shanghaiDay,contrastColor} from './lib.js';
 const {Text}=Typography;
@@ -61,15 +61,6 @@ export function HandoffView({state,actorId,onOpen,onAccept,onChanges}) {
   return <><div className="handoff-toolbar"><Text type="secondary">保留全部提交版本，包括退回后与仍在进行中的成果。</Text><Segmented value={statusFilter} onChange={setStatusFilter} options={[{label:'全部成果',value:'all'},{label:'待交接',value:'review'},{label:'已确认',value:'done'},{label:'其他历史',value:'historical'}]}/></div><Table className="task-table" rowKey="id" dataSource={items} columns={columns} pagination={false} size="middle" scroll={{x:1130}} expandable={{expandedRowRender:item => <div className="handoff-expanded"><div className="artifact-list">{item.artifacts?.map(artifact => <Artifact key={artifact.id} artifact={artifact}/>)}</div></div>,rowExpandable:item => item.artifacts?.length > 0}} locale={{emptyText:<Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={statusFilter === 'review' ? '当前没有待交接的成果' : '暂无对应记录'}/>}}/></>;
 }
 
-export function ReferencesModal({onClose}) {
-  const references = [
-    {name:'Taskade',description:'项目可承载任务、文档与不同视图，支持真人实时协作；AI Agents 读取项目上下文并执行工作。',takeaway:'借鉴项目上下文集中呈现；本版先验证真人分工，不实现 Agent 自动执行任务。',links:[['项目介绍','https://www.taskade.com/learn/projects'],['实时协作','https://help.taskade.com/en/articles/8958440-real-time-collaboration']]},
-    {name:'Linear',description:'任务有单一负责人；项目更新可由 Agent 起草，再由用户修改并发布。',takeaway:'借鉴清晰的责任和人工确认；本版分别呈现负责人、成果接收人。',links:[['任务分配','https://linear.app/docs/assigning-issues'],['项目更新','https://linear.app/docs/initiative-and-project-updates']]},
-    {name:'Asana',description:'Smart Status 起草项目状态，用户可修改、放弃或发布。审批任务支持通过、要求修改及拒绝。',takeaway:'借鉴草稿先确认、审批结果清晰；不将成果验收宣称为独有创新。',links:[['Smart Status','https://help.asana.com/s/article/smart-status'],['审批任务','https://help.asana.com/s/article/approvals']]},
-    {name:'Plane',description:'提供工作项与 AI 工作空间能力，支持自托管及模型服务配置。自托管的联网边界取决于具体部署。',takeaway:'借鉴透明的部署边界；本版采用单实例协作服务，部署与模型服务需要分别配置。',links:[['Plane AI','https://plane.so/ai'],['自托管','https://plane.so/self-hosted']]}
-  ];
-  return <Modal open title="参考产品与本版取舍" onCancel={onClose} footer={<Button onClick={onClose}>关闭</Button>} width={760}><p className="reference-note">核对日期：2026-10-20。依据官方介绍，未逐一注册实测；未提及的能力不代表产品没有。</p>{references.map(item => <article className="reference-entry" key={item.name}><h3>{item.name}</h3><p>{item.description}</p><div className="reference-takeaway">本版取舍：{item.takeaway}</div><div className="reference-links">{item.links.map(([label,url]) => <a href={url} key={url} target="_blank" rel="noopener noreferrer">{label} <ExportOutlined/></a>)}</div></article>)}<Divider/><article className="reference-entry"><h3>界面采用 Ant Design React 6</h3><p>使用真实的 Table、Tabs、Drawer、Form、Upload、Modal 等组件，采用 14px 正文、12px 辅助信息，以翡翠绿标记主操作，并保留独立的状态色。</p><div className="reference-links">{['table','drawer','form','tabs'].map(name => <a key={name} href={`https://ant.design/components/${name}/`} target="_blank" rel="noopener noreferrer">{name[0].toUpperCase()+name.slice(1)} 文档 <ExportOutlined/></a>)}</div></article></Modal>;
-}
 
 export function ProjectCenter({workspace,onSelect,onCreate}) {
   const [query,setQuery]=useState(''),[sort,setSort]=useState('created');

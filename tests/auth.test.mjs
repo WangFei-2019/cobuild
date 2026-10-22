@@ -179,9 +179,13 @@ test('邀请邮箱、撤销、到期和只读角色均由服务器执行；同�
   db.prepare('UPDATE invitations SET expiresAt=? WHERE id=?').run('2000-01-01T00:00:00.000Z',expired.id); db.close();
   assert.equal((await client().get(`/api/invitations/resolve?token=${new URL(expired.url).pathname.split('/').at(-1)}`)).status,410);
   const namesake = client();
-  const generic = await invite(admin,namesake,{email:'namesake@example.com',name:'林夏'});
-  assert.notEqual(generic.session.user.personId,resolved.person.id);
-  assert.equal((await admin.json('/api/people')).people.filter(person=>person.name==='林夏').length,2);
+  const offered = await admin.post('/api/invitations',{projectId:'p1',email:'namesake@example.com'});
+  const nicknameToken = new URL((await offered.json()).invitation.url).pathname.split('/').at(-1);
+  const duplicate = await namesake.post('/api/auth/register',{name:'林夏',email:'namesake@example.com',password:PASSWORD,inviteToken:nicknameToken});
+  assert.equal(duplicate.status,409); assert.equal((await duplicate.json()).code,'NAME_TAKEN');
+  const registered = await namesake.post('/api/auth/register',{name:'林夏的另一位伙伴',email:'namesake@example.com',password:PASSWORD,inviteToken:nicknameToken});
+  assert.equal(registered.status,200); assert.notEqual((await registered.json()).user.personId,resolved.person.id);
+  assert.equal((await admin.json('/api/people')).people.filter(person=>person.name==='林夏').length,1);
 });
 
 test('登录限流持久化，Origin/Host保护，远程初始化口令和Secure Cookie',async t => {

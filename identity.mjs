@@ -15,6 +15,10 @@ const clean = (value, label, max = 100) => {
   if (typeof value !== 'string' || !value.trim() || value.length > max) throw new AppError(`${label}格式不正确`);
   return value.trim();
 };
+const nicknameKey = value => value.trim().normalize('NFKC').trim().toLowerCase();
+function accountFieldConflict(field, code, message) {
+  const error = new AppError(message, 409); error.field = field; error.code = code; return error;
+}
 function email(value) {
   const result = clean(value, '邮箱', 254).toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(result)) throw new AppError('请输入有效邮箱');
@@ -53,6 +57,16 @@ export function createIdentity(dataDir) {
   };
   const accountCount = () => get('SELECT COUNT(*) AS count FROM accounts').count;
   let registrationsInFlight = 0;
+  // Keep legacy names intact, including historical duplicates. Every new
+  // account or changed effective nickname is checked in the same write
+  // transaction as its mutation, rather than adding a destructive UNIQUE
+  // constraint to the shared people directory.
+  function assertNicknameAvailable(name, excludingAccountId) {
+    const key = nicknameKey(name);
+    const occupied = all('SELECT a.id,p.name FROM accounts a JOIN people p ON p.id=a.personId').some(account =>
+      account.id !== excludingAccountId && nicknameKey(account.name) === key);
+    if (occupied) throw accountFieldConflict('name', 'NAME_TAKEN', '该昵称已被占用');
+  }
   function person(personId) {
     if (typeof personId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(personId)) throw new AppError('没有找到这个成员档案',404);
     const value = get('SELECT p.*,a.id AS accountId FROM people p LEFT JOIN accounts a ON a.personId=p.id WHERE p.id=?', personId);
@@ -102,6 +116,8 @@ export function createIdentity(dataDir) {
       const targetAccount = get('SELECT id FROM accounts WHERE personId=?', invitation.personId);
       if (targetAccount) throw new AppError('该成员档案已绑定其他账号', 409);
       assertClaimScope(invitation.personId, invitation.createdBy, invitation.projectId);
+      const target = person(invitation.personId);
+      if (nicknameKey(target.name) !== nicknameKey(current.name)) assertNicknameAvailable(target.name, current.id);
       const overlap = get('SELECT 1 FROM project_members a JOIN project_members b ON a.projectId=b.projectId WHERE a.personId=? AND b.personId=? LIMIT 1', personId, invitation.personId);
       if (overlap) throw new AppError('当前账号已在相关项目中，不能认领另一成员档案', 409);
       run('UPDATE project_members SET personId=? WHERE personId=?', invitation.personId, personId);
@@ -166,7 +182,9 @@ export function createIdentity(dataDir) {
       const fields = profileFields(patch, { partial: true });
       return transaction(() => {
         const previous = person(personId), next = { ...previous, ...fields };
-        checkProfileDuplicates(all('SELECT id,name FROM people'), next.name === previous.name ? undefined : next.name, { excludingId: personId, allowDuplicateName });
+        const account = get('SELECT id FROM accounts WHERE personId=?', personId), changedNickname = nicknameKey(next.name) !== nicknameKey(previous.name);
+        if (account && changedNickname) assertNicknameAvailable(next.name, account.id);
+        checkProfileDuplicates(all('SELECT id,name FROM people'), changedNickname ? next.name : undefined, { excludingId: personId, allowDuplicateName });
         run('UPDATE people SET name=?,bio=?,color=?,initial=? WHERE id=?', next.name, next.bio, next.color, next.initial, personId);
         bump(); return person(personId);
       });
@@ -208,9 +226,9 @@ export function createIdentity(dataDir) {
       return session(account.id);
     },
     async register(input, joinProject, ip = 'unknown') {
-      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['name','email','password','inviteToken'].includes(key))) throw new AppError('注册仅支持姓名、邮箱、密码与可选邀请令牌');
+      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['name','email','password','inviteToken'].includes(key))) throw new AppError('注册仅支持昵称、邮箱、密码与可选邀请令牌');
       if (!accountCount()) throw new AppError('请先由部署者完成工作区管理员初始化，再注册个人账号', 409);
-      const name = clean(input.name, '姓名', 40), address = email(input.email);
+      const name = clean(input.name, '昵称', 40), address = email(input.email);
       password(input.password);
       const invited = Object.hasOwn(input, 'inviteToken');
       if (invited) invitationByToken(input.inviteToken);
@@ -226,11 +244,14 @@ export function createIdentity(dataDir) {
         return transaction(() => {
           const invitation = invited ? invitationByToken(input.inviteToken) : null;
           if (invitation?.email && invitation.email !== address) throw new AppError('请使用邀请指定的邮箱注册', 403);
-          if (get('SELECT id FROM accounts WHERE email=?', address)) throw new AppError('该邮箱已注册，请登录后继续', 409);
+          if (get('SELECT id FROM accounts WHERE email=?', address)) throw accountFieldConflict('email', 'EMAIL_TAKEN', '该邮箱已注册');
           if (invitation?.personId) {
             if (get('SELECT id FROM accounts WHERE personId=?', invitation.personId)) throw new AppError('该成员档案已绑定账号', 409);
             assertClaimScope(invitation.personId, invitation.createdBy, invitation.projectId);
+            // Claiming an existing profile preserves that profile's display
+            // name, which may differ from the submitted registration nickname.
           }
+          assertNicknameAvailable(invitation?.personId ? person(invitation.personId).name : name);
           const personId = invitation?.personId || newPerson(name), accountId = id('account');
           run('INSERT INTO accounts VALUES(?,?,?,?,?,?,?)', accountId, address, personId, fields.salt, fields.key, 'member', now());
           const accepted = invitation ? claim(invitation, user(accountId), joinProject) : null;

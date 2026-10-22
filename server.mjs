@@ -411,7 +411,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       const publicDir = resolve(ROOT,'public'), file = resolve(publicDir,relative);
       if (!file.startsWith(`${publicDir}/`) || !existsSync(file) || !statSync(file).isFile()) throw new AppError('页面或文件不存在',404);
       send(res,200,req.method === 'HEAD' ? '' : readFileSync(file),TYPES[extname(file)] || 'application/octet-stream',{'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});
-    } catch (error) { send(res,error.status || 500,{error:error.status ? error.message : '服务处理失败，请查看服务日志',...(error.code==='DUPLICATE_PERSON_NAME'?{code:error.code}:{})},undefined,error.retryAfter ? {'Retry-After':String(error.retryAfter)} : {}); if (!error.status) process.stderr.write(`${error.stack}\n`); }
+    } catch (error) { send(res,error.status || 500,{error:error.status ? error.message : '服务处理失败，请查看服务日志',...(['DUPLICATE_PERSON_NAME','EMAIL_TAKEN','NAME_TAKEN'].includes(error.code)?{code:error.code}:{}),...(['email','name'].includes(error.field)?{field:error.field}:{})},undefined,error.retryAfter ? {'Retry-After':String(error.retryAfter)} : {}); if (!error.status) process.stderr.write(`${error.stack}\n`); }
   });
   server.on('close',() => identity?.close());
   return server;

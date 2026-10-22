@@ -25,29 +25,33 @@ function PersonChoice({person,disambiguate=false}) {
 
 export function PersonProfileModal({person=null,revision,onClose,onSubmit}) {
   const {message,modal}=AntApp.useApp(),[form]=Form.useForm(),[saving,setSaving]=useState(false);
-  const [version,setVersion]=useState(revision),[conflict,setConflict]=useState(null);
+  const [version,setVersion]=useState(revision),[conflict,setConflict]=useState(null),[nameTaken,setNameTaken]=useState(false);
+  const pending=useRef(false);
   async function save(values,allowDuplicateName=false) {
-    setSaving(true);
+    if(pending.current)return;
+    pending.current=true;setSaving(true);setNameTaken(false);
     try {
       await onSubmit(values,{expectedRevision:version,allowDuplicateName});
       onClose();
     } catch(error) {
-      if(error.code==='DUPLICATE_PERSON_NAME'&&!allowDuplicateName) {
+      if(error.status===409&&error.code==='NAME_TAKEN') {
+        setNameTaken(true);form.setFields([{name:'name',errors:['该昵称已被占用']}]);form.scrollToField('name',{focus:true});
+      } else if(error.code==='DUPLICATE_PERSON_NAME'&&!allowDuplicateName) {
         modal.confirm({title:'目录中已有同名人员',content:'如果是同一位伙伴，请取消并选择已有档案。若确认是不同的人，可以保留独立档案，历史记录不会合并。',
           okText:'确认是不同人员',cancelText:'返回核对',onOk:()=>save(values,true)});
       } else if(error.status===409&&person) {
         try {const latest=await api('/api/people/'+encodeURIComponent(person.id));setConflict(latest);}
         catch {message.error(error.message);}
       } else message.error(error.message||'人员档案暂时未能保存');
-    } finally {setSaving(false);}
+    } finally {pending.current=false;setSaving(false);}
   }
   return <Modal open title={person?'编辑人员档案':'添加人员'} width={540} onCancel={saving?undefined:onClose} closable={!saving} mask={{closable:!saving}}
-    onOk={()=>form.submit()} okText={person?'保存档案':'添加人员'} confirmLoading={saving} okButtonProps={{disabled:Boolean(conflict)}} cancelButtonProps={{disabled:saving}}>
+    onOk={()=>form.submit()} okText={person?'保存档案':'添加人员'} confirmLoading={saving} okButtonProps={{disabled:Boolean(conflict)||nameTaken}} cancelButtonProps={{disabled:saving}}>
     <p className="person-form-explanation">档案用于分工和记录归属。平台用户的项目访问，仍需通过项目邀请获得。</p>
     {conflict&&<Alert type="warning" showIcon title="档案已有更新，当前输入已保留" style={{marginBottom:18}}
       description={<><p>最新姓名：{conflict.person?.name}；简介：{conflict.person?.bio||'未填写'}。</p><Button size="small" onClick={()=>{setVersion(conflict.revision);setConflict(null);}}>已核对，保留当前输入继续保存</Button></>}/>}
-    <Form form={form} layout="vertical" disabled={saving} onFinish={values=>save(values)} initialValues={{name:person?.name||'',bio:person?.bio||'',color:person?.color||colors[0]}}>
-      <Form.Item name="name" label="姓名" rules={[{required:true,whitespace:true,message:'请填写姓名'}]}><Input maxLength={40} autoComplete="off"/></Form.Item>
+    <Form form={form} layout="vertical" disabled={saving} onFinish={values=>save(values)} onValuesChange={changed=>{if(Object.hasOwn(changed,'name'))setNameTaken(false);}} initialValues={{name:person?.name||'',bio:person?.bio||'',color:person?.color||colors[0]}}>
+      <Form.Item name="name" label={person?.accountLinked?'昵称':'姓名'} rules={[{required:true,whitespace:true,message:person?.accountLinked?'请填写昵称':'请填写姓名'}]} validateStatus={nameTaken?'error':undefined} help={nameTaken?'该昵称已被占用':undefined} extra={person?.accountLinked?'账号昵称不能与其他已注册账号重复。':undefined}><Input maxLength={40} autoComplete="off"/></Form.Item>
       <Form.Item name="bio" label="人员简介" extra="可记录擅长领域、协作背景等；项目中的负责方向单独维护。"><Input.TextArea maxLength={1000} showCount rows={4}/></Form.Item>
       <Form.Item name="color" label="头像颜色" getValueFromEvent={value=>typeof value==='string'?value:value.toHexString()}>
         <ColorPicker format="hex" disabledAlpha showText presets={[{label:'常用颜色',colors}]} aria-label="人员头像颜色"/>

@@ -36,7 +36,7 @@ async function fixture(t, { setup = true } = {}) {
   const admin = client();
   const initialize = () => admin('/api/auth/setup', { name: '既有工作区管理员', email: 'admin@registration.test', password, setupToken: 'fixture-admin-bootstrap' });
   if (setup) assert.equal((await initialize()).status, 200);
-  async function register(email, name = '独立注册者') {
+  async function register(email, name = `用户-${email.split('@')[0]}`) {
     const request = client(), response = await request('/api/auth/register', { name, email, password });
     assert.equal(response.status, 200, response.data.error);
     return { request, user: response.data.user, response };
@@ -73,7 +73,7 @@ test('首次管理员初始化之前关闭自助注册，完成后开放普通�
 
 test('A/B独立注册各建私有项目，账号和项目权限隔离，接受精确邀请前无法加入，重启持久有效', async t => {
   const { admin, register, snapshot, files, restart } = await fixture(t);
-  const a = await register('a@registration.test', '同名用户'), b = await register('b@registration.test', '同名用户');
+  const a = await register('a@registration.test', 'A用户'), b = await register('b@registration.test', 'B用户');
   assert.notEqual(a.user.personId, b.user.personId);
   assert.equal(a.user.workspaceRole, 'member'); assert.equal(b.user.workspaceRole, 'member');
   assert.deepEqual((await a.request('/api/people')).data.people.map(person => person.id), [a.user.personId]);
