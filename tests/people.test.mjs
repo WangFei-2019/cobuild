@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { seedState, AppError } from '../domain.mjs';
-import { peopleSummary, personDetails } from '../people.mjs';
+import { peopleSummary, personDetails, projectWithProfiles } from '../people.mjs';
 
 function fixture() {
   const a = seedState(); a.project.color = '#123456';
@@ -54,4 +54,31 @@ test('成果区分实际提交人和历史任务归属，只有已确认的最�
   assert.equal(old.acceptanceStatus, 'historical');
   assert.equal(old.acceptedAt, '');
   assert.equal(detail.tasks.find(t => t.id === a.tasks[0].id).relation, 'contributor');
+});
+
+test('同一人员离开后以新成员编号回归只算一个项目，保留旧提交与历史快照且不重复任务', () => {
+  const { a, identity } = fixture();
+  const departed=a.members.find(member=>member.id==='m2');
+  departed.active=false;departed.leftAt='2026-10-22T00:00:00Z';departed.name='离开时姓名';
+  a.members.push({...departed,id:'rejoined',name:'新成员姓名',role:'新的负责方向',active:true,leftAt:''});
+  const oldMember=identity.member;
+  identity.member=(projectId,memberId)=>memberId==='rejoined'?{personId:'person-a',accessRole:'admin'}:oldMember(projectId,memberId);
+  a.tasks.forEach(task=>{task.artifacts=[];});
+  const task=a.tasks[0];task.ownerId='rejoined';task.reviewerId='m2';task.artifacts=[
+    {id:'before-leaving',name:'离开前成果',submittedBy:'m2',createdAt:'2026-10-21T00:00:00Z'},
+    {id:'after-rejoin',name:'回归后成果',submittedBy:'rejoined',createdAt:'2026-10-22T00:00:00Z'}
+  ];
+  a.activities=[{id:'before-activity',actorId:'m2',taskId:task.id,createdAt:'2026-10-21T00:00:00Z'},
+    {id:'after-activity',actorId:'rejoined',taskId:task.id,createdAt:'2026-10-22T00:00:00Z'}];
+  const original=structuredClone(a),user={personId:'person-a'};
+  const row=peopleSummary(identity,[a],user).find(person=>person.id==='person-a');
+  const detail=personDetails(identity,[a],user,'person-a');
+  assert.equal(row.projectCount,1);assert.equal(row.projects.length,1);assert.equal(detail.projects.length,1);
+  assert.equal(row.projects[0].memberId,'rejoined');assert.equal(row.projects[0].accessRole,'admin');assert.equal(row.projects[0].role,'新的负责方向');
+  assert.deepEqual(row.projects[0].historicalMemberIds,['m2']);assert.equal(row.projects[0].active,true);
+  assert.equal(detail.tasks.filter(item=>item.id===task.id).length,1);assert.equal(detail.tasks.find(item=>item.id===task.id).relation,'owner-reviewer');
+  assert.deepEqual(detail.artifacts.map(item=>item.id).sort(),['after-rejoin','before-leaving']);
+  assert.equal(detail.summary.artifactCount,2);assert.equal(detail.activities.length,2);
+  assert.equal(projectWithProfiles(a,identity).members.find(member=>member.id==='m2').name,'离开时姓名');
+  assert.deepEqual(a,original);
 });

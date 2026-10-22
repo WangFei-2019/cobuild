@@ -120,7 +120,7 @@ test('旧库同名账号无迁移不删不改，简介编辑与同canonical认�
   const unchanged = identity.updatePerson(beta.user.personId, { bio: '保留历史同名，仅改简介' });
   assert.equal(unchanged.name, 'ＡＬＰＨＡ');
   await assert.rejects(identity.register({ name: 'alpha', email: 'new@legacy.test', password }), error => error.status === 409 && error.code === 'NAME_TAKEN');
-  identity.syncProject({ project: { id: 'legacy-project' }, members: [{ id: 'm1', name: ' alpha ', color: '#123abc', initial: 'a' }] });
+  identity.syncProject({ project: { id: 'legacy-project' }, members: [{ id: 'm0', name: '管理员', color: '#427b68', initial: '管' }, { id: 'm1', name: ' alpha ', color: '#123abc', initial: 'a' }] }, new Map([['m0', { personId: admin.user.personId, accessRole: 'admin' }]]));
   const invitation = identity.invite({ projectId: 'legacy-project', memberId: 'm1' }, admin.user);
   const accepted = identity.accept(invitation.token, beta.user, () => { throw new Error('Existing profile membership must be retained'); });
   assert.equal(accepted.user.name, ' alpha '); assert.notEqual(accepted.user.personId, beta.user.personId);

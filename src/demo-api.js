@@ -1,5 +1,6 @@
 import seed from '../demo/seed.json' with { type: 'json' };
 import { randomUUID } from 'node:crypto';
+import {memberImpact,planMemberAction} from '../membership.mjs';
 import { AppError, applyAction, analyzeUpdate, projectReport } from '../domain.mjs';
 import { applyPlanDraft, validatePlanDraft, applyMilestoneAction, reconcileMilestones, previewReplan, applyReplanDraft } from '../planning.mjs';
 import { dashboardSummary } from '../dashboard.mjs';
@@ -30,7 +31,7 @@ function dataShape(value) {
   return record(value) && value.schemaVersion === 1 && Number.isSafeInteger(value.revision) && value.revision > 0
     && Array.isArray(value.projects) && Array.isArray(value.people) && record(value.bindings) && record(value.files)
     && value.projects.every(state => state?.schemaVersion === 1 && state.project?.id && Number.isSafeInteger(state.revision)
-      && ['members', 'tasks', 'activities', 'decisions'].every(key => Array.isArray(state[key])))
+      && ['members', 'tasks', 'activities', 'decisions'].every(key => Array.isArray(state[key])) && (state.discussions===undefined||Array.isArray(state.discussions)&&state.discussions.length<=1000))
     && (value.projects.length ? value.projects.some(state => state.project.id === value.defaultProjectId) : value.defaultProjectId === null)
     && (!Object.hasOwn(value,'archivedSamples') || Array.isArray(value.archivedSamples) && value.archivedSamples.every(entry => record(entry) && isSampleState(entry.state) && typeof entry.archivedAt === 'string'))
     && (!Object.hasOwn(value,'archivedProjects') || Array.isArray(value.archivedProjects) && value.archivedProjects.every(entry=>record(entry)&&!isSampleState(entry.state)&&entry.state?.project?.id&&typeof entry.archivedAt==='string'))
@@ -83,16 +84,16 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     const person = personId => { const value = doc.people.find(item => item.id === personId); if (!value) throw new AppError('没有找到这个演示成员档案', 404); return clone(value); };
     const member = (projectId, memberId) => {
       const binding = doc.bindings[projectId]?.[memberId];
-      return binding ? { ...clone(binding), projectId, memberId, accountLinked: Boolean(person(binding.personId).accountLinked) } : null;
+      return binding ? { ...clone(binding),active:binding.active!==false, projectId, memberId, accountLinked: Boolean(person(binding.personId).accountLinked) } : null;
     };
     return { person, people: () => {
       const archivedVirtual = new Set((doc.archivedSamples || []).flatMap(entry => entry.state.members.filter(item => item.virtual).map(item => doc.bindings[entry.state.project.id]?.[item.id]?.personId)));
       const activePeople = new Set(doc.projects.flatMap(state => Object.values(doc.bindings[state.project.id] || {}).map(item => item.personId)));
       return clone(doc.people.filter(item => !archivedVirtual.has(item.id) || activePeople.has(item.id) || item.id === doc.currentPersonId));
     }, member, membership(projectId, personId) {
-      const item = Object.entries(doc.bindings[projectId] || {}).find(([, value]) => value.personId === personId);
+      const item = Object.entries(doc.bindings[projectId] || {}).find(([, value]) => value.personId === personId&&value.active!==false);
       return item ? member(projectId, item[0]) : null;
-    } };
+    },departed(projectId,personId){return Object.values(doc.bindings[projectId]||{}).some(value=>value.personId===personId&&value.active===false);} };
   }
   function user(doc) {
     const person = identity(doc).person(doc.currentPersonId);
@@ -107,25 +108,30 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     if (!state) throw new AppError('没有找到这个演示项目', 404);
     return projectWithProfiles(state,identity(doc));
   }
-  const permissions = { manageProject: true, createTask: true, readOnly: false };
+  function permissionsFor(doc,state){
+    const adapter=identity(doc),membership=adapter.membership(state.project.id,doc.currentPersonId),sample=isSampleState(state);
+    const departed=!membership&&adapter.departed(state.project.id,doc.currentPersonId),manageProject=sample?sampleOwner(state)===user(doc).id:!departed;
+    const write=Boolean(membership&&(manageProject||membership.accessRole==='member'));
+    return {manageProject,createTask:write,readOnly:!write,canArchive:!sample&&manageProject,manageMembers:!sample,governance:!sample&&departed};
+  }
   function decorate(doc, state) {
     const adapter = identity(doc);
     const named = projectWithProfiles(state,adapter);
     return { ...clone(named), demo: true, members: named.members.map(member => ({ ...clone(member), ...adapter.member(state.project.id, member.id) })),
-      currentMemberId: adapter.membership(state.project.id, doc.currentPersonId)?.memberId || null, sample:sampleInfo(state,user(doc).id), permissions: { ...permissions,canArchive:!isSampleState(state), ...(isSampleState(state)?{manageMembers:false}:{}) } };
+      currentMemberId: adapter.membership(state.project.id, doc.currentPersonId)?.memberId || null, sample:sampleInfo(state,user(doc).id), permissions:permissionsFor(doc,state) };
   }
   function authorized(doc, state) {
     const value = decorate(doc, state);
-    for (const member of value.members) if (member.id === value.currentMemberId) member.accessRole = 'admin';
+    for (const member of value.members) if (member.id === value.currentMemberId&&value.permissions.manageProject) member.accessRole = 'admin';
     return value;
   }
   function workspace(doc) {
     return { revision: doc.revision, defaultProjectId: doc.defaultProjectId, currentPersonId: doc.currentPersonId, demo: true,
-      permissions: { createProject: true, manageWorkspace: true }, archivedProjects:(doc.archivedProjects||[]).map(archivedProjectView),archivedSamples:(doc.archivedSamples || []).filter(entry=>sampleOwner(entry.state)===user(doc).id).map(archivedSampleView), projects: doc.projects.map(state => {
+      permissions: { createProject: true, manageWorkspace: true }, archivedProjects:(doc.archivedProjects||[]).map(entry=>archivedProjectView(entry,doc)),archivedSamples:(doc.archivedSamples || []).filter(entry=>sampleOwner(entry.state)===user(doc).id).map(archivedSampleView), projects: doc.projects.map(state => {
         const value = decorate(doc, state), p = state.project;
         return { ...clone(p), description: p.description || '', goal: p.goal || '', deadline: p.deadline || '', color: p.color || '#427b68',
-          ownerName: value.members.find(member => member.id === 'm0')?.name || '', memberCount: state.members.length,
-          taskCount: state.tasks.length, doneCount: state.tasks.filter(task => task.status === 'done').length,
+          ownerName: value.members.find(member => member.id === 'm0')?.name || '', memberCount: state.members.filter(member=>member.active!==false).length,
+          taskCount: state.tasks.filter(task=>task.status!=='canceled').length,canceledCount:state.tasks.filter(task=>task.status==='canceled').length, doneCount: state.tasks.filter(task => task.status === 'done').length,
           blockedCount: state.tasks.filter(task => task.status === 'blocked').length, reviewCount: state.tasks.filter(task => task.status === 'review').length,
           sample:value.sample, permissions:value.permissions, members: value.members };
       }) };
@@ -144,7 +150,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     if (isSampleState(previous)) clean.sample=clone(previous.sample); else delete clean.sample;
     for (const member of clean.members) {
       const stored = previous.members.find(item=>item.id===member.id);
-      if (stored) for (const field of ['name','color','initial']) { if (Object.hasOwn(stored,field)) member[field]=stored[field]; else delete member[field]; }
+      if (stored&&!(member.active===false&&stored.active!==false)) for (const field of ['name','color','initial']) { if (Object.hasOwn(stored,field)) member[field]=stored[field]; else delete member[field]; }
     }
     doc.projects[doc.projects.findIndex(state => state.project.id === clean.project.id)] = clean;
     doc.revision += 1; persist(doc); return decorate(doc, clean);
@@ -199,12 +205,13 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     const {state,archivedAt}=entry;
     return {id:state.project.id,name:state.project.name,color:state.project.color,revision:state.revision,archivedAt,sample:{version:1,canRestore:true}};
   }
-  const archivedProjectView=entry=>({id:entry.state.project.id,name:entry.state.project.name,color:entry.state.project.color||'#427b68',revision:entry.state.revision,archivedAt:entry.archivedAt,canRestore:true});
+  const archivedProjectView=(entry,doc)=>({id:entry.state.project.id,name:entry.state.project.name,color:entry.state.project.color||'#427b68',revision:entry.state.revision,archivedAt:entry.archivedAt,canRestore:permissionsFor(doc,entry.state).canArchive});
   function realProjectArchive(doc,input,restore){
     sampleInput(input,restore?['projectId']:['projectId','expectedRevision']);
     const active=doc.projects.find(state=>state.project.id===input.projectId),entry=(doc.archivedProjects||[]).find(item=>item.state.project.id===input.projectId),state=active||entry?.state;
     if(!state)throw new AppError('没有找到这个项目',404);
     if(isSampleState(state))throw new AppError('示例请使用专属移除与恢复入口',403);
+    if(!permissionsFor(doc,state).canArchive)throw new AppError('当前只有治理查看权限，不能归档或恢复此项目',403);
     if(restore){
       if(active)return {state:decorate(doc,state),workspace:workspace(doc),reused:true,restored:false};
       doc.projects.push(state);doc.archivedProjects=doc.archivedProjects.filter(item=>item!==entry);doc.defaultProjectId ||=state.project.id;doc.revision+=1;persist(doc);
@@ -212,10 +219,10 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     }
     if(!Number.isSafeInteger(input.expectedRevision))throw new AppError('请提供归档所依据的项目版本');
     if(input.expectedRevision!==state.revision)throw new AppError('项目已有更新，请核对最新内容后再归档',409);
-    if(entry)return {workspace:workspace(doc),archivedProject:archivedProjectView(entry),alreadyArchived:true};
+    if(entry)return {workspace:workspace(doc),archivedProject:archivedProjectView(entry,doc),alreadyArchived:true};
     const archived={state:clone(state),archivedAt:now().toISOString()};doc.archivedProjects=[...(doc.archivedProjects||[]),archived];doc.projects=doc.projects.filter(item=>item!==active);
     if(doc.defaultProjectId===state.project.id)doc.defaultProjectId=doc.projects[0]?.project.id||null;doc.revision+=1;persist(doc);
-    return {workspace:workspace(doc),archivedProject:archivedProjectView(archived),alreadyArchived:false};
+    return {workspace:workspace(doc),archivedProject:archivedProjectView(archived,doc),alreadyArchived:false};
   }
   function inbox(doc){return deriveNotifications(identity(doc),visibleStates(doc),user(doc),{now:now()});}
   function inboxView(doc){return notificationView(inbox(doc),new Set(doc.notificationReads?.[user(doc).id]||[]));}
@@ -340,6 +347,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
       if (path === '/api/workspace') return workspace(doc);
       if(path==='/api/account')return accountView(doc);
       if(path==='/api/notifications')return inboxView(doc);
+      if(path==='/api/members/impact'){const values=url.searchParams.getAll('memberId');if(values.length!==1)throw new AppError('请指定一位项目成员');return memberImpact(stateFor(doc,projectId),adapter,current,values[0]);}
       if (path === '/api/dashboard') { const queries = url.searchParams.getAll('q'); if (queries.length > 1) throw new AppError('请只指定一个搜索内容'); return { demo: true, revision: doc.revision, ...dashboardSummary(adapter, visibleStates(doc), current, { query: queries[0] || '', now: now() }) }; }
       if (path === '/api/people') {
         const selected=url.searchParams.getAll('selectableForProject');if(selected.length>1)throw new AppError('请只指定一个项目');
@@ -348,7 +356,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
       }
       if (/^\/api\/people\/[A-Za-z0-9_-]+$/.test(path)) {const id=path.split('/').at(-1);if(!adapter.people().some(person=>person.id===id))throw new AppError('没有找到这个成员档案',404);const detail=personDetails(adapter,visibleStates(doc),current,id);return {demo:true,...detail,person:profileView(doc,detail.person),revision:doc.revision,permissions:{...peoplePermissions,editProfile:!virtualSamplePerson(doc,id)}};}
       if (path === '/api/ai/status') return { configured: false, demo: true, samplePlanning: true, provider: 'local-sample', model: DEMO_MODEL, baseUrl: '', fileLimit: FILE_LIMIT, filesLimit: FILES_LIMIT };
-      if (path === '/api/ai/capabilities') { stateFor(doc,projectId); return { configured:false,samplePlanning:true,canGenerate:true }; }
+      if (path === '/api/ai/capabilities') { const state=stateFor(doc,projectId); return { configured:false,samplePlanning:true,canGenerate:permissionsFor(doc,state).manageProject&&!permissionsFor(doc,state).readOnly }; }
       if (path === '/api/state') return decorate(doc, stateFor(doc, projectId));
       if (path === '/api/export') return exportState(doc,stateFor(doc, projectId));
       if (path === '/api/report') return projectReport(projectWithProfiles(stateFor(doc, projectId),adapter));
@@ -381,7 +389,13 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     if (path === '/api/samples/restore') {sampleInput(input,['projectId']);return restoreSample(doc,input.projectId);}
     if (path === '/api/projects') return createProject(doc, input);
     if(path==='/api/projects/archive'||path==='/api/projects/restore')return realProjectArchive(doc,input,path.endsWith('/restore'));
+    if(path==='/api/members/action'){
+      const state=stateFor(doc,projectId),plan=planMemberAction(state,adapter,current,input);
+      for(const change of plan.changes){const binding=doc.bindings[projectId]?.[change.memberId];if(!binding)throw new AppError('成员映射不可用');if(change.remove){binding.active=false;binding.leftAt=plan.departures.find(item=>item.memberId===change.memberId)?.leftAt||now().toISOString();}else binding.accessRole=change.accessRole;}
+      const next=saveState(doc,reconcileMilestones(plan.state));return {state:next,workspace:workspace(doc)};
+    }
     const state = stateFor(doc, projectId), action = actor(doc, state, input);
+    if(permissionsFor(doc,state).readOnly)throw new AppError('当前只有只读或治理查看权限，不能修改此项目',403);
     if(isSampleState(state) && (path==='/api/project-members'||path==='/api/action'&&['addMember','updateMember'].includes(action.type)))throw new AppError('示例使用固定虚拟伙伴，真实协作请创建自己的项目',403);
     if (path === '/api/ai/plan' || path === '/api/ai/replan') return samplePlan(doc, state, input, path.endsWith('/replan'));
     if (path === '/api/analyze') return { analysis: analyzeUpdate(state, action), demo: true };
@@ -401,7 +415,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
       if(action.type==='updateMember'&&!Number.isSafeInteger(action.expectedRevision))throw new AppError('请提供成员编辑所依据的项目版本');
       if (action.type === 'submitArtifact' && action.file) attachFile(doc, action);
       else { delete action.fileMeta; if (action.type === 'submitArtifact' && typeof action.url === 'string' && action.url.startsWith('/api/')) throw new AppError('请通过文件选择器提交本地演示附件'); }
-      next = reconcileMilestones(applyAction(state, action, { manageProject: true }));
+      next = reconcileMilestones(applyAction(authorized(doc,state), action, { manageProject: decorate(doc,state).permissions.manageProject }));
       if (action.type === 'addMember') { const member = next.members.at(-1), person = addPerson(doc, member.name, member.color); doc.bindings[state.project.id][member.id] = { personId: person.id, accessRole: 'member' }; }
     } else throw new AppError('演示接口不存在', 404);
     return { state: saveState(doc, next), ...(path === '/api/project-members' ? { workspace: workspace(doc) } : {}) };

@@ -1,10 +1,11 @@
 import React,{useEffect,useRef,useState} from 'react';
-import {App as AntApp,Alert,Avatar,Button,Card,ColorPicker,Dropdown,Empty,Form,Input,Modal,Select,Space,Table,Tabs,Tag,Typography} from 'antd';
+import {App as AntApp,Alert,Avatar,Button,Card,ColorPicker,Dropdown,Empty,Form,Input,Modal,Select,Segmented,Space,Table,Tabs,Tag,Typography} from 'antd';
 import {ArrowRightOutlined,CopyOutlined,EditOutlined,EllipsisOutlined,LinkOutlined,PlusOutlined,SearchOutlined,TeamOutlined,UserAddOutlined} from '@ant-design/icons';
-import {api,isDemo,canManage,dateLabel,safeColor,contrastColor,avatarInitial} from './lib.js';
+import {api,isDemo,canManage,memberIsActive,dateLabel,safeColor,contrastColor,avatarInitial,timeLabel} from './lib.js';
 import {navigate} from './router.js';
 import {Person} from './shared.jsx';
 import './people.css';
+import MemberLifecycleModal from './member-lifecycle.jsx';
 
 const {Text}=Typography;
 const accessOptions=[{value:'admin',label:'项目管理员'},{value:'member',label:'项目成员'},{value:'viewer',label:'只读成员'}];
@@ -61,14 +62,15 @@ export function PersonProfileModal({person=null,revision,onClose,onSubmit}) {
   </Modal>;
 }
 
-export function MemberManager({state,metadata,onSaved,onWorkspaceRefresh,compact=false,addInitially=false,onAddClosed}) {
+export function MemberManager({state,metadata,onSaved,onWorkspaceRefresh,onLifecycleSaved,onBeforeRevoke,compact=false,addInitially=false,onAddClosed}) {
   const {message,modal}=AntApp.useApp(),[adding,setAdding]=useState(addInitially),[addingMode,setAddingMode]=useState(isDemo?'existing':'invite');
   const [invite,setInvite]=useState(null),[inviteResult,setInviteResult]=useState(null),[roleEditor,setRoleEditor]=useState(null);
+  const [lifecycle,setLifecycle]=useState(null),[membershipFilter,setMembershipFilter]=useState('active');
   const [saving,setSaving]=useState(false),[form]=Form.useForm(),[inviteForm]=Form.useForm(),[addInviteForm]=Form.useForm(),[roleForm]=Form.useForm();
   const [people,setPeople]=useState([]),[invitations,setInvitations]=useState([]),[query,setQuery]=useState(''),[loadError,setLoadError]=useState(''),[directoryLoading,setDirectoryLoading]=useState(false);
-  const manager=canManage(state)&&state.permissions?.manageMembers!==false,projectId=state.project.id,alive=useRef(true),loadSerial=useRef(0);
+  const manager=canManage(state)&&state.permissions?.manageMembers!==false,lifecycleManager=state.permissions?.manageMembers===true||manager,projectId=state.project.id,alive=useRef(true),loadSerial=useRef(0);
   const members=state.members.map(member=>({...metadata?.members?.find(item=>item.id===member.id),...member}));
-  const selectablePeople=people.filter(person=>!members.some(member=>member.personId===person.id));
+  const selectablePeople=people.filter(person=>!members.some(member=>memberIsActive(member)&&member.personId===person.id));
   const nameCounts=new Map();
   for(const person of selectablePeople){const name=normalizedName(person.name);nameCounts.set(name,(nameCounts.get(name)||0)+1);}
   const isSameName=person=>(nameCounts.get(normalizedName(person.name))||0)>1;
@@ -137,7 +139,8 @@ export function MemberManager({state,metadata,onSaved,onWorkspaceRefresh,compact
     catch(error) {message.error(error.message);}
     finally {setSaving(false);}
   }
-  const visible=members.filter(member=>!query.trim()||(member.name+' '+(member.role||'')).toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  const visible=members.filter(member=>(membershipFilter==='all'||membershipFilter==='active'&&memberIsActive(member)||membershipFilter==='left'&&!memberIsActive(member))&&(!query.trim()||(member.name+' '+(member.role||'')).toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())));
+  const currentMember=members.find(member=>member.id===state.currentMemberId&&memberIsActive(member));
   const invitationForm=(formInstance,fromAdding=false)=><Form form={formInstance} layout="vertical" disabled={saving} onFinish={values=>createInvite(values,fromAdding)} initialValues={{accessRole:'member'}}>
     <p className="person-form-explanation">{!fromAdding&&invite?.id?'对方接受后认领这份原有档案，已有任务与成果归属保留。':'把邀请链接交给对方，由对方登录或注册后确认加入。不会自动发送邮件。'}</p>
     <Form.Item name="email" label="指定接收邮箱（可选）" rules={[{type:'email',message:'请填写有效邮箱'}]}><Input type="email" autoComplete="off"/></Form.Item>
@@ -148,21 +151,24 @@ export function MemberManager({state,metadata,onSaved,onWorkspaceRefresh,compact
     <div className="members-page-heading"><div><h2>{compact?'项目成员':'项目分工与成员'}</h2><p>{state.sample?.version===1?'示例使用固定虚拟伙伴，不邀请或添加真实账号；真实协作请新建自己的空白项目。':'人员档案用于分工，平台账号通过邀请获得项目访问。'}</p></div>{manager&&<Space wrap>
       <Button icon={<LinkOutlined/>} onClick={()=>openAdding('invite')}>邀请账号加入</Button>
       <Button type="primary" icon={<UserAddOutlined/>} onClick={()=>openAdding('existing')}>添加人员</Button>
-    </Space>}</div>
-    {isDemo&&<p className="people-mode-note">当前仅管理本地档案和分工；真实账号邀请与异地协作需运行完整服务端。</p>}
+    </Space>}{!state.sample&&currentMember&&<Button onClick={()=>setLifecycle({mode:'leaveProject',member:currentMember})}>退出项目</Button>}</div>
+    {state.permissions?.governance&&<Alert style={{marginBottom:18}} type="info" showIcon title="你已退出任务协作，仍保留工作区管理员的成员治理权限" description="可以调整成员访问与管理权；不能编辑任务、添加分工或代替历史成员发言。"/>}{isDemo&&<p className="people-mode-note">当前仅管理本地档案和分工；真实账号邀请与异地协作需运行完整服务端。</p>}
     {loadError&&<Alert style={{marginBottom:18}} type="warning" showIcon title="人员目录或邀请记录暂未刷新" description={loadError} action={<Button size="small" onClick={load}>重试</Button>}/>}
-    <div className="project-members-toolbar"><span><TeamOutlined/>{members.length} 位项目成员</span><Input prefix={<SearchOutlined/>} value={query} onChange={event=>setQuery(event.target.value)} allowClear placeholder="搜索姓名或负责方向" aria-label="搜索项目成员"/></div>
+    <div className="project-members-toolbar"><div className="members-lifecycle-heading"><span><TeamOutlined/>{members.filter(memberIsActive).length} 位当前成员</span><Segmented value={membershipFilter} onChange={setMembershipFilter} aria-label="筛选当前或离开成员" options={[{value:'active',label:'当前成员'},{value:'left',label:`已离开 ${members.filter(member=>!memberIsActive(member)).length}`},{value:'all',label:'全部历史'}]}/></div><Input prefix={<SearchOutlined/>} value={query} onChange={event=>setQuery(event.target.value)} allowClear placeholder="搜索姓名或负责方向" aria-label="搜索项目成员"/></div>
     <div className="project-members-grid">{visible.map(member=>{
-      const owned=state.tasks.filter(task=>task.ownerId===member.id),done=owned.filter(task=>task.status==='done').length;
+      const owned=state.tasks.filter(task=>task.ownerId===member.id&&task.status!=='canceled'),done=owned.filter(task=>task.status==='done').length;
       const reviewing=state.tasks.filter(task=>task.reviewerId===member.id&&task.status==='review').length;
-      const menuItems=[...(manager?[{key:'role',label:'编辑本项目负责方向'}]:[]),
-        ...(!isDemo&&manager&&!member.accountLinked?[{key:'invite',label:'邀请账号认领档案'}]:[])];
-      return <Card key={member.id} className="project-member-card">
+      const active=memberIsActive(member);
+      const menuItems=[...(manager&&active?[{key:'role',label:'编辑本项目负责方向'}]:[]),
+        ...(!isDemo&&manager&&active&&!member.accountLinked?[{key:'invite',label:'邀请账号认领档案'}]:[]),
+        ...(!state.sample&&active&&lifecycleManager?[...(manager?[{type:'divider'}]:[]),{key:'setAccessRole',label:'调整项目权限'},...(member.accessRole==='admin'&&member.accountLinked&&(member.id===state.currentMemberId||state.permissions?.governance)?[{key:'transferAdmin',label:'转交项目管理权'}]:[]),...(member.id!==state.currentMemberId?[{key:'removeMember',label:'移出项目（保留历史）',danger:true}]:[])]:[])];
+      return <Card key={member.id} className={`project-member-card${active?'':' is-inactive'}`}>
         <div className="project-member-card-heading"><Person id={member.id} members={state.members} size={40}/><Space size={4}>
-          <Tag className={'member-access '+(member.accountLinked?member.accessRole||'member':'profile')}>{!member.accountLinked?'仅分工档案':accessOptions.find(option=>option.value===member.accessRole)?.label||'项目成员'}</Tag>
-          {menuItems.length>0&&<Dropdown menu={{items:menuItems,onClick:({key})=>{if(key==='role')editRole(member);if(key==='invite')openInvite(member);}}}><Button type="text" size="small" icon={<EllipsisOutlined/>} aria-label={'管理'+member.name}/></Dropdown>}
+          <Tag className={'member-access '+(member.accountLinked?member.accessRole||'member':'profile')}>{!active?'已离开':!member.accountLinked?'仅分工档案':accessOptions.find(option=>option.value===member.accessRole)?.label||'项目成员'}</Tag>
+          {menuItems.length>0&&<Dropdown menu={{items:menuItems,onClick:({key})=>{if(key==='role')editRole(member);else if(key==='invite')openInvite(member);else setLifecycle({mode:key,member});}}}><Button type="text" size="small" icon={<EllipsisOutlined/>} aria-label={'管理'+member.name}/></Dropdown>}
         </Space></div>
         <div className="member-role-label">本项目负责方向</div><p className="member-role">{member.role||'尚未约定负责方向'}</p>
+        {!active&&<p className="member-left-note">{timeLabel(member.leftAt)} 已离开。保留原有成果、讨论与历史归属，不再接受新分工。</p>}
         <div className="member-work-summary"><div><strong>{owned.length-done}</strong><span>负责未完成</span></div><div><strong>{done}</strong><span>已完成</span></div><div><strong>{reviewing}</strong><span>待接收</span></div></div>
         <div className="member-card-footer"><span className={'person-account-state'+(member.accountLinked?' linked':'')}><i/>{isDemo?(member.accountLinked?'本地体验身份':'本地人员档案'):(member.accountLinked?'已关联平台账号':'未授予账号访问')}</span>
           {member.personId&&<Button type="text" size="small" icon={<ArrowRightOutlined/>} aria-label={'查看'+member.name+'的人员档案'} onClick={()=>navigate('/people/'+encodeURIComponent(member.personId))}/>}
@@ -214,5 +220,6 @@ export function MemberManager({state,metadata,onSaved,onWorkspaceRefresh,compact
       <p className="person-form-footnote">只修改这一个项目的分工，保留人员档案、历史成果和既有访问角色。</p>
     </Modal>}
 
+    {lifecycle&&<MemberLifecycleModal key={`${lifecycle.mode}:${lifecycle.member.id}`} state={state} member={lifecycle.member} mode={lifecycle.mode} onBeforeRevoke={onBeforeRevoke} onClose={()=>setLifecycle(null)} onSaved={result=>{if(onLifecycleSaved)onLifecycleSaved(result);else if(result.state)onSaved(result.state);onWorkspaceRefresh?.();message.success(({leaveProject:'已退出项目，历史记录保留',removeMember:'成员已移出，原有记录保留',transferAdmin:'项目管理权已转交',setAccessRole:'项目权限已调整'})[lifecycle.mode]);if(result.state&&canManage(result.state))load();}}/>}
   </>;
 }

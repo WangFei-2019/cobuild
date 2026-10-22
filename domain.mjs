@@ -31,6 +31,10 @@ function member(state, memberId) {
   if (!value) throw new AppError('请选择有效团队成员', 403);
   return value;
 }
+function activeMember(state, memberId) {
+  const value=member(state,memberId);if(value.active===false)throw new AppError('该成员已离开项目，请选择在职成员',403);return value;
+}
+function assignableMember(state,memberId){const value=activeMember(state,memberId);if(value.accessRole==='viewer')throw new AppError('只读成员不能承担新分工',403);return value;}
 function task(state, taskId) {
   const value = state.tasks.find(t => t.id === taskId);
   if (!value) throw new AppError('没有找到这项任务', 404);
@@ -42,6 +46,7 @@ function mayEdit(taskValue, actorId, manageProject) {
 
 export function canManageProject(state, actorId) {
   const actor = member(state, actorId);
+  if(actor.active===false)return false;
   return Object.hasOwn(actor, 'accessRole') ? actor.accessRole === 'admin' : actorId === 'm0';
 }
 
@@ -55,7 +60,7 @@ function milestone(state, value, due = '') {
 function dependencies(state, taskId, values) {
   if (!Array.isArray(values) || values.some(v => typeof v !== 'string')) throw new AppError('任务依赖格式不正确');
   const result = [...new Set(values)];
-  result.forEach(v => { task(state, v); if (v === taskId) throw new AppError('任务不能依赖自己'); });
+  result.forEach(v => { const predecessor=task(state,v);if(predecessor.status==='canceled'&&!state.tasks.find(item=>item.id===taskId)?.dependsOn?.includes(v))throw new AppError('不能新增对已取消任务的依赖'); if (v === taskId) throw new AppError('任务不能依赖自己'); });
   const reaches = (from, seen = new Set()) => {
     if (from === taskId) return true;
     if (seen.has(from)) return false;
@@ -66,13 +71,13 @@ function dependencies(state, taskId, values) {
   return result;
 }
 function checkTaskDates(state, candidate, { checkDate = false, newDependencies = [] } = {}) {
-  const dependents = state.tasks.filter(value => value.id !== candidate.id && value.dependsOn.includes(candidate.id));
+  const dependents = state.tasks.filter(value => value.id !== candidate.id && value.status!=='canceled' && value.dependsOn.includes(candidate.id));
   if (checkDate) {
     if (candidate.due && state.project.deadline && candidate.due > state.project.deadline) throw new AppError('任务截止日期不能晚于项目截止日期');
     if (!candidate.due && (candidate.dependsOn.length || dependents.length || state.milestones?.some(value => value.id === candidate.milestoneId && value.due))) throw new AppError('关联依赖或里程碑的任务需要明确截止日期');
     for (const predecessorId of candidate.dependsOn) {
       const predecessor = task(state, predecessorId);
-      if (candidate.due && predecessor.due && predecessor.due > candidate.due) throw new AppError('任务截止日期不能早于前置任务');
+      if (predecessor.status!=='canceled' && candidate.due && predecessor.due && predecessor.due > candidate.due) throw new AppError('任务截止日期不能早于前置任务');
     }
     if (candidate.due && dependents.some(value => value.due && candidate.due > value.due)) throw new AppError('任务截止日期不能晚于依赖它的后置任务');
   }
@@ -130,8 +135,9 @@ export function seedState() {
 
 export function analyzeUpdate(state, input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new AppError('请求格式不正确');
-  member(state, input.actorId);
+  activeMember(state, input.actorId);
   const t = task(state, input.taskId);
+  if(t.status==='canceled')throw new AppError('任务已取消，请先明确恢复再更新进展',409);
   const text = required(input.text, '进展内容', 6000);
   const clauses = text.split(/[，。；！!?？\n]/).map(s => s.trim()).filter(Boolean);
   const clearedClause = s => /(不再|没有|未出现|无)(受阻|阻塞)|(?:受阻|阻塞|等待)(?:状态)?(?:已经|已)?(?:解除|解决|结束)|不(?:需要|用|必)(?:再)?等|不用等|无需等待/.test(s);
@@ -154,26 +160,85 @@ export function analyzeUpdate(state, input) {
     status = 'doing'; rationale.push('原文描述正在推进或阻塞解除，建议标记为进行中。');
   } else rationale.push('没有识别到明确的状态变化，保存原文并保留当前状态。');
   if (t.status === 'done') { status = null; rationale.push('任务已经确认交接，新增说明不会自动重开任务。'); }
-  const affectedTaskIds = state.tasks.filter(v => v.dependsOn.includes(t.id) && v.status !== 'done').map(v => v.id);
+  const affectedTaskIds = state.tasks.filter(v => v.dependsOn.includes(t.id) && !['done','canceled'].includes(v.status)).map(v => v.id);
   return { mode: 'local-rules', summary: text.length > 120 ? `${text.slice(0, 120)}…` : text, status, blocker, missing, affectedTaskIds, rationale, sourceText: text, taskUpdatedAt: t.updatedAt };
+}
+
+function lifecycleInput(state,input,t,fields){
+  const allowed=['type','actorId','projectId','taskId','taskUpdatedAt','expectedRevision',...fields];
+  if(Object.keys(input).some(key=>!allowed.includes(key)))throw new AppError('任务生命周期操作包含不支持字段');
+  const version=Number.isSafeInteger(input.expectedRevision)&&input.expectedRevision===state.revision;
+  const snapshot=typeof input.taskUpdatedAt==='string'&&input.taskUpdatedAt===t.updatedAt;
+  if(!version&&!snapshot)throw new AppError('请核对最新任务快照后重试取消或恢复',409);
+}
+function discussionAction(state,input,actor,manageProject){
+  if(actor.accessRole==='viewer')throw new AppError('只读成员不能发表讨论',403);
+  const allowed=['type','actorId','projectId','expectedRevision',...(input.type==='addDiscussion'?['taskId','body','kind','replyTo','mentionIds']:['discussionId'])];
+  if(Object.keys(input).some(key=>!allowed.includes(key)))throw new AppError('讨论操作包含不支持字段');
+  state.discussions ||= [];
+  if(input.type==='addDiscussion'){
+    task(state,input.taskId);if(state.discussions.length>=1000||state.discussions.filter(item=>item.taskId===input.taskId).length>=200)throw new AppError('讨论数量已达上限（项目1000条、单任务200条）');
+    const body=required(input.body,'讨论内容',4000),kind=input.kind??'comment';if(!['comment','question'].includes(kind))throw new AppError('讨论类型不正确');
+    const replyTo=input.replyTo??null,parent=replyTo?state.discussions.find(item=>item.id===replyTo):null;
+    if(replyTo!==null&&(typeof replyTo!=='string'||!parent||parent.taskId!==input.taskId))throw new AppError('回复必须指向当前任务中的讨论');
+    if(replyTo&&kind==='question')throw new AppError('问题需要作为独立根讨论发表');
+    const mentions=input.mentionIds??[];if(!Array.isArray(mentions)||mentions.length>20||new Set(mentions).size!==mentions.length)throw new AppError('提及成员最多20名且不能重复');for(const personId of mentions)activeMember(state,personId);
+    const entry={id:id('discussion'),taskId:input.taskId,authorId:input.actorId,body,kind,replyTo,mentionIds:[...mentions],createdAt:now(),resolved:false};
+    state.discussions.push(entry);activity(state,input.actorId,input.taskId,'discussion',kind==='question'?'提出待确认问题。':'添加任务讨论。');
+  }else{
+    const entry=state.discussions.find(item=>item.id===input.discussionId);if(!entry)throw new AppError('讨论不存在',404);
+    if(entry.kind!=='question'||entry.replyTo)throw new AppError('只能解决独立的问题讨论');
+    if(entry.authorId!==input.actorId&&!manageProject)throw new AppError('只有问题作者或项目管理者可以解决问题',403);
+    if(entry.resolved)return state;
+    entry.resolved={actorId:input.actorId,createdAt:now()};activity(state,input.actorId,entry.taskId,'discussion','问题已标记解决。');
+  }
+  state.revision+=1;return state;
 }
 
 export function applyAction(current, input, permissions = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new AppError('请求格式不正确');
   const state = structuredClone(current);
-  member(state, input.actorId);
+  const actor=activeMember(state, input.actorId);
   const manageProject = permissions.manageProject === undefined ? canManageProject(state, input.actorId) : permissions.manageProject === true;
   if (input.expectedRevision != null && input.expectedRevision !== state.revision) throw new AppError('其他成员刚刚更新了项目，请刷新后再试', 409);
+  if(['addDiscussion','resolveDiscussion'].includes(input.type))return discussionAction(state,input,actor,manageProject);
   let t;
-  if (['updateTask', 'setStatus', 'addUpdate', 'submitArtifact', 'accept', 'requestChanges'].includes(input.type)) {
+  if (['cancelTask','restoreTask','updateTask', 'setStatus', 'addUpdate', 'submitArtifact', 'accept', 'requestChanges'].includes(input.type)) {
     t = task(state, input.taskId);
     if (input.taskUpdatedAt && input.taskUpdatedAt !== t.updatedAt) throw new AppError('任务已有更新，请核对最新内容后重新操作', 409);
-    if (!['accept', 'requestChanges'].includes(input.type)) mayEdit(t, input.actorId, manageProject);
+    if(t.status==='canceled'&&input.type!=='restoreTask')throw new AppError('任务已取消，请先明确恢复再修改',409);
+    if (!['cancelTask','restoreTask','accept', 'requestChanges'].includes(input.type)) mayEdit(t, input.actorId, manageProject);
   }
   switch (input.type) {
+    case 'cancelTask': {
+      lifecycleInput(state,input,t,['reason']);
+      if(!manageProject)throw new AppError('请由项目管理者明确取消任务',403);
+      if(t.status==='done'||t.acceptedAt)throw new AppError('已确认交接的任务不能取消',409);
+      const record={previousStatus:t.status,reason:required(input.reason,'取消原因',2000),actorId:input.actorId,createdAt:now()};
+      t.status='canceled';t.cancellation=record;t.cancelHistory=[record,...(t.cancelHistory||[])].slice(0,50);
+      activity(state,input.actorId,t.id,'cancel','取消任务：'+record.reason);break;
+    }
+    case 'restoreTask': {
+      lifecycleInput(state,input,t,['ownerId','reviewerId','due','milestoneId','dependsOn']);
+      if(!manageProject)throw new AppError('请由项目管理者明确恢复任务',403);
+      if(t.status!=='canceled'||!['todo','doing','blocked','review'].includes(t.cancellation?.previousStatus))throw new AppError('任务没有可恢复的取消记录',409);
+      const oldOwner=t.ownerId,oldReviewer=t.reviewerId,previousDependencies=[...t.dependsOn];
+      if('ownerId'in input)t.ownerId=input.ownerId;if('reviewerId'in input)t.reviewerId=input.reviewerId;assignableMember(state,t.ownerId);assignableMember(state,t.reviewerId);
+      if('due'in input)t.due=date(input.due);
+      if('dependsOn'in input)t.dependsOn=dependencies(state,t.id,input.dependsOn);
+      if('milestoneId'in input)t.milestoneId=milestone(state,input.milestoneId);
+      milestone(state,t.milestoneId,t.due);checkTaskDates(state,t,{checkDate:true,newDependencies:t.dependsOn.filter(value=>!previousDependencies.includes(value))});
+      t.status=t.cancellation.previousStatus;
+      if((oldOwner!==t.ownerId||oldReviewer!==t.reviewerId)&&t.artifacts.length){t.status='doing';t.blocker='';t.needsResubmission=true;}
+      if(t.status==='review'&&(!t.artifacts.length||t.needsResubmission))t.status='doing';
+      if(t.status==='blocked'&&!t.blocker)t.status='todo';
+      const restored={...t.cancellation,restoredAt:now(),restoredBy:input.actorId};
+      t.cancelHistory=[restored,...(t.cancelHistory||[]).slice(1)].slice(0,50);delete t.cancellation;
+      activity(state,input.actorId,t.id,'restore','明确恢复任务，当前状态：'+t.status+'。');break;
+    }
     case 'createTask': {
       if (state.tasks.length >= 500) throw new AppError('体验版最多支持 500 项任务');
-      member(state, input.ownerId); member(state, input.reviewerId);
+      assignableMember(state, input.ownerId); assignableMember(state, input.reviewerId);
       const taskId = id('task');
       const code = `CB-${Math.max(100, ...state.tasks.map(v => Number(v.code.split('-')[1]) || 100)) + 1}`;
       if (!priorities.has(input.priority || 'medium')) throw new AppError('优先级不正确');
@@ -191,8 +256,8 @@ export function applyAction(current, input, permissions = {}) {
         previousDependencies = [...t.dependsOn], previousMilestoneId = t.milestoneId || '';
       if ('title' in p) t.title = required(p.title, '任务名称', 180);
       if ('description' in p) t.description = optional(p.description);
-      if ('ownerId' in p) { member(state, p.ownerId); t.ownerId = p.ownerId; }
-      if ('reviewerId' in p) { member(state, p.reviewerId); t.reviewerId = p.reviewerId; }
+      if ('ownerId' in p) { assignableMember(state, p.ownerId); t.ownerId = p.ownerId; }
+      if ('reviewerId' in p) { assignableMember(state, p.reviewerId); t.reviewerId = p.reviewerId; }
       if ('due' in p) t.due = date(p.due);
       if ('priority' in p) { if (!priorities.has(p.priority)) throw new AppError('优先级不正确'); t.priority = p.priority; }
       if ('deliverable' in p) t.deliverable = required(p.deliverable, '交付约定', 1000);
@@ -226,6 +291,7 @@ export function applyAction(current, input, permissions = {}) {
       if (url && !/^https?:\/\//i.test(url) && !/^\/api\/files\/[a-f0-9-]+$/.test(url)) throw new AppError('成果链接只支持 http 或 https');
       if (/^https?:/i.test(url)) { try { const parsed = new URL(url); if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error(); } catch { throw new AppError('请填写有效的成果链接'); } }
       if (!url && !note) throw new AppError('请提供成果文件、链接或文字说明');
+      assignableMember(state,t.reviewerId);
       t.artifacts.unshift({ id: id('artifact'), name, url, note, createdAt: now(), submittedBy: input.actorId, ...(input.fileMeta ? {fileName: input.fileMeta.name, fileSize: input.fileMeta.size} : {}) });
       t.needsResubmission = false;
       move(t, 'review'); t.acceptedAt = '';
@@ -246,7 +312,7 @@ export function applyAction(current, input, permissions = {}) {
     }
     case 'addMember': {
       if (!manageProject) throw new AppError('请由项目发起人或管理者添加成员', 403);
-      if (state.members.length >= 32) throw new AppError('体验版最多支持 32 名成员');
+      if (state.members.filter(member=>member.active!==false).length >= 32) throw new AppError('体验版最多支持 32 名成员');
       const name = required(input.name, '成员姓名', 40);
       if (!permissions.allowDuplicateNames && state.members.some(m => m.name === name)) throw new AppError('已存在同名成员，请增加区分信息');
       state.members.push({ id: id('member'), name, role: optional(input.role, 80) || '项目协作者', initial: [...name].at(-1), color: ['#427b68', '#b47e59', '#7770a3', '#6387a2'][state.members.length % 4] });
@@ -273,7 +339,7 @@ export function applyAction(current, input, permissions = {}) {
       }
       if ('deadline' in p) {
         const deadline = date(p.deadline);
-        if (deadline && deadline !== state.project.deadline && (state.tasks.some(value => value.due && value.due > deadline)
+        if (deadline && deadline !== state.project.deadline && (state.tasks.some(value => value.status!=='canceled' && value.due && value.due > deadline)
           || state.milestones?.some(value => value.due && value.due > deadline))) throw new AppError('项目截止日期不能早于现有任务或里程碑，请先调整相关计划');
         state.project.deadline = deadline;
       }
@@ -290,17 +356,18 @@ export function applyAction(current, input, permissions = {}) {
 }
 
 export function projectReport(state) {
-  const label = {todo:'待开始',doing:'进行中',blocked:'受阻',review:'待交接',done:'已完成'};
+  const label = {canceled:'已取消',todo:'待开始',doing:'进行中',blocked:'受阻',review:'待交接',done:'已完成'};
   const name = memberId => state.members.find(m => m.id === memberId)?.name || '未分配';
   const clean = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ');
+  const prose=value=>clean(value).replace(/[\\`*_\[\]#]/g,'\\$&');
   const tasks = state.tasks || [], milestones = state.milestones || [];
-  const taskName = taskId => { const value = tasks.find(item => item.id === taskId); return value ? `${value.code} ${value.title}` : '未找到关联任务'; };
+  const taskName = taskId => { const value = tasks.find(item => item.id === taskId); return value ? `${value.code} ${value.title}${value.status==='canceled'?'（已取消，不能视为完成）':''}` : '未找到关联任务'; };
   const milestoneName = milestoneId => milestones.find(item => item.id === milestoneId)?.title || '未关联';
   const count = status => tasks.filter(item => item.status === status).length;
-  const lines = [`# ${clean(state.project.name)}`, '', clean(state.project.description), '', '## 项目目标与概况', '', clean(state.project.goal) || '目标待补充', '', `截止日期：${clean(state.project.deadline) || '未指定'}`, `数据版本：${state.revision}`, '', `任务 ${tasks.length} 项：待开始 ${count('todo')}，进行中 ${count('doing')}，受阻 ${count('blocked')}，待交接 ${count('review')}，已完成 ${count('done')}。`, `里程碑 ${milestones.length} 个，其中已验收 ${milestones.filter(item => item.status === 'accepted' && item.acceptedAt).length} 个。`, '', '## 里程碑与验收', ''];
+  const lines = [`# ${clean(state.project.name)}`, '', clean(state.project.description), '', '## 项目目标与概况', '', clean(state.project.goal) || '目标待补充', '', `截止日期：${clean(state.project.deadline) || '未指定'}`, `数据版本：${state.revision}`, '', `任务 ${tasks.length} 项：待开始 ${count('todo')}，进行中 ${count('doing')}，受阻 ${count('blocked')}，待交接 ${count('review')}，已完成 ${count('done')}，已取消 ${count('canceled')}（不计入有效任务完成率）。`, `里程碑 ${milestones.length} 个，其中已验收 ${milestones.filter(item => item.status === 'accepted' && item.acceptedAt).length} 个。`, '', '## 里程碑与验收', ''];
   if (!milestones.length) lines.push('尚未制定里程碑。');
   for (const milestone of milestones) {
-    const related = tasks.filter(item => item.milestoneId === milestone.id);
+    const related = tasks.filter(item => item.milestoneId === milestone.id && item.status!=='canceled');
     const accepted = milestone.status === 'accepted' && milestone.acceptedAt;
     lines.push(`### ${clean(milestone.title)}`, '', `状态：${accepted ? '已验收' : '推进中'}；计划日期：${clean(milestone.due) || '未指定'}；已交接任务：${related.filter(item => item.status === 'done' && item.acceptedAt).length}/${related.length}。`, '', `阶段目标：${clean(milestone.goal)}`, '', `验收标准：${clean(milestone.acceptanceCriteria)}`, '', `关联任务：${related.map(item => clean(`${item.code} ${item.title}`)).join('；') || '尚未关联任务'}`);
     if (accepted) lines.push('', `验收人：${clean(name(milestone.acceptedBy))}；验收时间：${clean(milestone.acceptedAt)}`, '', `验收说明：${clean(milestone.acceptanceNote) || '未附说明'}`);
@@ -324,6 +391,11 @@ export function projectReport(state) {
   }));
   if (!artifactCount) lines.push('暂无提交成果。');
   else lines.push('', '文件地址是协作服务中的引用。本报告不包含上传文件本身，也不能代替完整数据备份。');
+  const canceled=tasks.filter(item=>item.status==='canceled');
+  if(canceled.length){lines.push('','## 已取消任务','');for(const item of canceled)lines.push('- '+clean(item.code)+' '+clean(item.title)+'：'+clean(item.cancellation?.reason)+'；取消人：'+clean(name(item.cancellation?.actorId))+'；时间：'+clean(item.cancellation?.createdAt));}
+  const lifecycle=tasks.filter(item=>item.cancelHistory?.length);
+  if(lifecycle.length){lines.push('','## 取消与恢复记录','');for(const item of lifecycle)for(const entry of item.cancelHistory)lines.push('- '+prose(item.code)+' '+prose(item.title)+'：'+prose(entry.reason)+'；取消人 '+prose(name(entry.actorId))+'；'+prose(entry.createdAt)+(entry.restoredAt?'；恢复人 '+prose(name(entry.restoredBy))+'；'+prose(entry.restoredAt):'；尚未恢复'));}
+  if(state.discussions?.length){lines.push('','## 任务讨论与问题','');for(const entry of state.discussions)lines.push('- '+prose(taskName(entry.taskId))+' · '+prose(name(entry.authorId))+'：'+prose(entry.body)+(entry.kind==='question'?(entry.resolved?'（已解决）':'（待解决问题）'):''));}
   lines.push('', '## 最近动态', '');
   (state.activities || []).slice(0, 20).forEach(a => lines.push(`- ${clean(a.createdAt)} ${clean(name(a.actorId))}：${clean(a.text)}`));
   lines.push('', '> 进展整理使用本地规则；成果交接由指定接收人确认。AI 规划是否可用取决于工作区模型配置。');

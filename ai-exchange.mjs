@@ -28,7 +28,7 @@ function outputSchema(state, mode) {
   const date = { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$', format: 'date' };
   const temporaryId = { ...string(64), pattern: '^[A-Za-z0-9][A-Za-z0-9_-]*$' };
   const existingId = { ...string(100, 0), pattern: '^(?:[A-Za-z0-9][A-Za-z0-9_-]*)?$' };
-  const memberId = { type: 'string', enum: state.members.map(member => member.id) };
+  const memberId = { type: 'string', enum: state.members.filter(member=>member.active!==false&&member.accessRole!=='viewer').map(member => member.id) };
   const milestone = { type: 'object', additionalProperties: false, properties: {
     id: temporaryId, title: string(180), goal: string(1500), due: date, acceptanceCriteria: string(2000), ...(replan ? { existingMilestoneId: existingId } : {})
   } }; milestone.required = Object.keys(milestone.properties);
@@ -61,7 +61,7 @@ export function buildPlanningPrompt(state, { mode = 'initial', today, request = 
     mode, baseRevision: state.revision, ...(today ? { today } : {}),
     project: { id: p.id, name: safeText(p.name), description: safeText(p.description), goal: safeText(p.goal), deadline: p.deadline || '' },
     request: Object.fromEntries(['goal', 'deadline', 'scope', 'constraints'].filter(key => request?.[key] !== undefined).map(key => [key, safeText(request[key])])),
-    members: state.members.map(({ id, name, role }) => ({ id, name: safeText(name), role: safeText(role) })),
+    members: state.members.filter(member=>member.active!==false&&member.accessRole!=='viewer').map(({ id, name, role }) => ({ id, name: safeText(name), role: safeText(role) })),
     existingTasks: state.tasks.map(task => ({ id: task.id, code: task.code || '', title: safeText(task.title), description: safeText(task.description),
       ownerId: task.ownerId, reviewerId: task.reviewerId, due: task.due || '', deliverable: safeText(task.deliverable), dependsOn: [...(task.dependsOn || [])],
       milestoneId: task.milestoneId || '', status: task.status, blocker: safeText(task.blocker), artifactCount: task.artifacts?.length || 0,
@@ -81,6 +81,7 @@ export function buildPlanningPrompt(state, { mode = 'initial', today, request = 
     mode === 'initial'
       ? '初始规划仅新增工作，不改任何原任务或里程碑；milestoneId和dependsOn只引用本草案的临时ID，不引用已有业务ID。不返回existingTaskId、existingMilestoneId或projectGoal，也不重复已有工作。'
       : '调整剩余计划必须返回projectGoal。每项任务都含existingTaskId、每项里程碑都含existingMilestoneId：新建时明确为空串，更新时只可使用editableTaskIds/editableMilestoneIds。不要靠标题匹配；未引用的原工作全部保留，不能删除或重编号，任务原状态与历史保留。保护任务及其成果/验收不可改，保护里程碑对象不可改；不能把新任务或迁入任务加入保护里程碑，原本在其中的可编辑任务可以保留原关联更新其它字段。dependsOn/milestoneId可以引用草案临时ID或对应原业务ID；关联里程碑必须非空且有效。请检查包括未引用旧任务在内的整个依赖图和日期。没有剩余工作时允许tasks/milestones为空，只调整目标；完全无变化的草案无法应用。',
+    '已取消任务是受保护历史，不计有效任务进度，不能自动恢复、删除或将取消前置任务视为已完成；不得新增对已取消任务的依赖。成员active:false不能承担新分工。',
     '输出总量控制在120KiB以内。导入会严格核对交换信封的项目、模式和来源版本；若当前项目已改变，旧信封将被拒绝，用户必须重新导出最新提示词并获取新草案，不能手改baseRevision绕过。不得返回__proto__、constructor、prototype等结构键。'
   ];
   const result = `${rules.join('\n\n')}\n\n项目事实：\n${JSON.stringify(facts, null, 2)}\n\n返回交换信封JSON Schema：\n${JSON.stringify(exchangeSchema(state, mode), null, 2)}`;

@@ -51,3 +51,9 @@ test('验证与恢复邮件使用fragment令牌，认证回跳不会进入恢复
  assert.equal(safeNextPath('/account'),'/account');
  assert.equal(parseRoute(new URL('https://cobuild.example/notifications')).kind,'notifications');
 });
+
+test('讨论提醒深链保留任务和目标楼层，普通任务链接不添加新字段',()=>{
+ const route=parseRoute(new URL('https://cobuild.example/projects/p1/tasks?task=t1&discussion=discussion-7'));
+ assert.deepEqual(route,{kind:'project',projectId:'p1',tab:'tasks',taskId:'t1',discussionId:'discussion-7'});
+ assert.deepEqual(parseRoute(new URL('https://cobuild.example/projects/p1/tasks?task=t1')),{kind:'project',projectId:'p1',tab:'tasks',taskId:'t1'});
+});

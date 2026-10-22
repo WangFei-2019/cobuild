@@ -5,6 +5,7 @@ import { randomBytes, randomUUID, createHash, scrypt as scryptCallback, timingSa
 import { promisify } from 'node:util';
 import { AppError } from './domain.mjs';
 import { profileFields, checkProfileDuplicates } from './people.mjs';
+import { planMemberAction } from './membership.mjs';
 
 const scrypt = promisify(scryptCallback);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -37,7 +38,7 @@ function strictFields(input,allowed) {
 }
 function invalidAccountToken() {const error=new AppError('链接无效、已使用或已过期，请重新申请',400);error.code='TOKEN_INVALID';return error;}
 
-export function createIdentity(dataDir, { projectAvailable = () => true, personVisible = () => true } = {}) {
+export function createIdentity(dataDir, { projectAvailable = () => true, personVisible = () => true, memberAvailable = () => true, memberRoleAllowed = () => true } = {}) {
   const path = join(dataDir, 'identity.sqlite');
   const db = new DatabaseSync(path);
   chmodSync(path, 0o600);
@@ -52,6 +53,7 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
     CREATE TABLE IF NOT EXISTS account_email_verification(accountId TEXT PRIMARY KEY REFERENCES accounts(id),verifiedAt TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS account_tokens(tokenHash TEXT PRIMARY KEY,purpose TEXT NOT NULL CHECK(purpose IN ('verify-email','reset-password')),accountId TEXT NOT NULL REFERENCES accounts(id),email TEXT NOT NULL,createdAt TEXT NOT NULL,expiresAt TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('pending','active','used','revoked')));
     CREATE TABLE IF NOT EXISTS project_members(projectId TEXT NOT NULL,memberId TEXT NOT NULL,personId TEXT NOT NULL REFERENCES people(id),accessRole TEXT NOT NULL,PRIMARY KEY(projectId,memberId),UNIQUE(projectId,personId));
+    CREATE TABLE IF NOT EXISTS project_member_history(projectId TEXT NOT NULL,memberId TEXT NOT NULL,personId TEXT NOT NULL REFERENCES people(id),accessRole TEXT NOT NULL,leftAt TEXT NOT NULL,PRIMARY KEY(projectId,memberId));
     CREATE TABLE IF NOT EXISTS invitations(id TEXT PRIMARY KEY,tokenHash TEXT NOT NULL UNIQUE,projectId TEXT NOT NULL,memberId TEXT,personId TEXT REFERENCES people(id),email TEXT NOT NULL DEFAULT '',accessRole TEXT NOT NULL,createdBy TEXT NOT NULL REFERENCES accounts(id),createdAt TEXT NOT NULL,expiresAt TEXT NOT NULL,status TEXT NOT NULL,acceptedBy TEXT REFERENCES accounts(id),acceptedAt TEXT);
     CREATE TABLE IF NOT EXISTS login_attempts(key TEXT PRIMARY KEY,count INTEGER NOT NULL,windowStart INTEGER NOT NULL);`);
   const run = (sql, ...args) => db.prepare(sql).run(...args);
@@ -131,6 +133,8 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
     if (!projectAvailable(invitation.projectId)) throw new AppError('邀请所属项目已不可用', 404);
     if (invitation.status !== 'pending') throw new AppError('邀请已经使用或撤销', 410);
     if (invitation.expiresAt <= now()) throw new AppError('邀请已过期', 410);
+    const inviter=user(invitation.createdBy),membership=inviter&&activeMembership(invitation.projectId,inviter.personId);
+    if(!membership||(inviter.workspaceRole!=='admin'&&membership.accessRole!=='admin'))throw new AppError('邀请发起人已不再管理该项目，请申请新邀请',410);
     return invitation;
   }
   function publicInvitation(value) {
@@ -147,7 +151,7 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
       throw new AppError('这份人员档案关联其他项目，请由有权管理所有关联项目的管理者或工作区管理员核对认领', 403);
     }
   }
-  function claim(invitation, current, joinProject, effects) {
+  function claim(invitation, current, joinProject, effects, claimingProfile=false) {
     if (invitation.email && invitation.email !== current.email) throw new AppError('请使用邀请指定的邮箱接受', 403);
     let personId = current.personId;
     if (invitation.personId && invitation.personId !== personId) {
@@ -159,10 +163,12 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
       const overlap = get('SELECT 1 FROM project_members a JOIN project_members b ON a.projectId=b.projectId WHERE a.personId=? AND b.personId=? LIMIT 1', personId, invitation.personId);
       if (overlap) throw new AppError('当前账号已在相关项目中，不能认领另一成员档案', 409);
       run('UPDATE project_members SET personId=? WHERE personId=?', invitation.personId, personId);
+      run('UPDATE project_member_history SET personId=? WHERE personId=?', invitation.personId, personId);
       run('UPDATE accounts SET personId=? WHERE id=?', invitation.personId, current.id);
       run('UPDATE invitations SET personId=? WHERE personId=?', invitation.personId, personId);
       run('DELETE FROM people WHERE id=?', personId);
       personId = invitation.personId;
+      claimingProfile=true;
     }
     let membership = get('SELECT * FROM project_members WHERE projectId=? AND personId=?', invitation.projectId, personId);
     if (!membership) {
@@ -172,6 +178,8 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
       run('INSERT INTO project_members VALUES(?,?,?,?)', invitation.projectId, memberId, personId, invitation.accessRole);
       membership = { memberId };
     } else {
+      if(!claimingProfile)throw new AppError('该账号已是项目成员，请通过成员管理调整访问权限',409);
+      assertRoleTransition(invitation.projectId,membership,invitation.accessRole);
       run('UPDATE project_members SET accessRole=? WHERE projectId=? AND memberId=?', invitation.accessRole, invitation.projectId, membership.memberId);
     }
     run("UPDATE invitations SET status='accepted',acceptedBy=?,acceptedAt=? WHERE id=?", current.id, now(), invitation.id);
@@ -205,6 +213,24 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
   }
   function releaseSuccessfulAttempt(reservations) {
     for (const { key, windowStart } of reservations) run('UPDATE login_attempts SET count=count-1 WHERE key=? AND windowStart=? AND count>0', key, windowStart);
+  }
+  function activeMembership(projectId,personId) {
+    const value=get('SELECT * FROM project_members WHERE projectId=? AND personId=?',projectId,personId);
+    return value&&memberAvailable(projectId,value.memberId)?{...value}:null;
+  }
+  function memberRecord(projectId,memberId) {
+    const current=get('SELECT * FROM project_members WHERE projectId=? AND memberId=?',projectId,memberId);
+    const historical=get('SELECT * FROM project_member_history WHERE projectId=? AND memberId=?',projectId,memberId);
+    const value=current||historical;if(!value)return null;
+    return {...value,active:Boolean(current&&memberAvailable(projectId,memberId)),leftAt:historical?.leftAt||'',...(historical?{lastAccessRole:historical.accessRole}:{}),accountLinked:person(value.personId).accountLinked};
+  }
+  function assertRoleTransition(projectId,record,nextRole) {
+    if(record.accessRole===nextRole)return;
+    if(!memberRoleAllowed(projectId,record.memberId,nextRole))throw new AppError('该人员仍有未结束分工，请先在成员管理中交接后再设为只读');
+    if(record.accessRole==='admin'&&nextRole!=='admin'&&person(record.personId).accountLinked) {
+      const admins=all("SELECT m.* FROM project_members m JOIN accounts a ON a.personId=m.personId WHERE m.projectId=? AND m.accessRole='admin'",projectId).filter(item=>memberAvailable(projectId,item.memberId));
+      if(admins.length<=1){const error=new AppError('项目需要至少一位已绑定账号的有效管理员，请先交接管理权',409);error.code='LAST_PROJECT_ADMIN';throw error;}
+    }
   }
   function accountView(accountId) {
     const current=user(accountId);if(!current)throw new AppError('请先登录工作区',401);
@@ -418,7 +444,7 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
           assertNicknameAvailable(invitation?.personId ? person(invitation.personId).name : name);
           const personId = invitation?.personId || newPerson(name), accountId = id('account');
           run('INSERT INTO accounts VALUES(?,?,?,?,?,?,?)', accountId, address, personId, fields.salt, fields.key, 'member', now());
-          const accepted = invitation ? claim(invitation, user(accountId), joinProject, effects) : null;
+          const accepted = invitation ? claim(invitation, user(accountId), joinProject, effects,Boolean(invitation.personId)) : null;
           if (!accepted) bump();
           return { ...session(accountId), ...(accepted ? { projectId: accepted.projectId } : {}) };
         });
@@ -428,6 +454,7 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
       transaction(effects => {
         if(effect)effects.push(effect);
         for (const member of state.members) {
+          if(member.active===false||get('SELECT 1 FROM project_member_history WHERE projectId=? AND memberId=?',state.project.id,member.id))continue;
           const existing = get('SELECT * FROM project_members WHERE projectId=? AND memberId=?', state.project.id, member.id);
           if (existing) continue;
           const binding = bindings.get(member.id);
@@ -438,19 +465,48 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
         }
       });
     },
-    membership(projectId, personId) { const value = get('SELECT * FROM project_members WHERE projectId=? AND personId=?', projectId, personId); return value ? { ...value } : null; },
-    member(projectId, memberId) { const value = get('SELECT * FROM project_members WHERE projectId=? AND memberId=?', projectId, memberId); return value ? { ...value, accountLinked: person(value.personId).accountLinked } : null; },
-    memberships(personId) { return all('SELECT * FROM project_members WHERE personId=?', personId).map(value => ({ ...value })); },
+    membership:activeMembership,member:memberRecord,
+    memberships(personId) { return all('SELECT * FROM project_members WHERE personId=?', personId).filter(value=>memberAvailable(value.projectId,value.memberId)).map(value => ({ ...value })); },
+    departed(projectId,personId) {return Boolean(get('SELECT 1 FROM project_member_history WHERE projectId=? AND personId=?',projectId,personId));},
+    transitionMembers(state,current,input,makeEffect) {
+      return transaction(effects=>{
+        const actor=user(current.id);if(!actor)throw new AppError('请先登录工作区',401);
+        const plan=planMemberAction(state,{member:memberRecord,membership:activeMembership,person},actor,input);
+        for(const change of plan.changes) {
+          const previous=get('SELECT * FROM project_members WHERE projectId=? AND memberId=?',state.project.id,change.memberId);
+          if(!previous)throw new AppError('成员映射已有更新，请重新查看影响后操作',409);
+          const account=get('SELECT id,email FROM accounts WHERE personId=?',previous.personId),rank={viewer:0,member:1,admin:2};
+          if(change.remove||rank[change.accessRole]<rank[previous.accessRole]) {
+            run("UPDATE invitations SET status='revoked' WHERE projectId=? AND status='pending' AND (memberId=? OR personId=? OR (email<>'' AND email=?))",state.project.id,previous.memberId,previous.personId,account?.email||'');
+            if(account&&(change.remove||previous.accessRole==='admin'))run("UPDATE invitations SET status='revoked' WHERE projectId=? AND status='pending' AND createdBy=?",state.project.id,account.id);
+          }
+          if(change.remove) {
+            const departure=plan.departures.find(item=>item.memberId===change.memberId);
+            run('INSERT INTO project_member_history VALUES(?,?,?,?,?)',state.project.id,previous.memberId,previous.personId,previous.accessRole,departure.leftAt);
+            run('DELETE FROM project_members WHERE projectId=? AND memberId=?',state.project.id,previous.memberId);
+          } else {
+            if(change.accessRole==='admin'&&!account)throw new AppError('项目管理员必须绑定真实账号');
+            run('UPDATE project_members SET accessRole=? WHERE projectId=? AND memberId=?',change.accessRole,state.project.id,change.memberId);
+          }
+        }
+        effects.push(makeEffect(plan.state));bump();return plan.state;
+      });
+    },
     invite(input, current) {
       if (!projectAvailable(input.projectId)) throw new AppError('邀请所属项目已不可用', 404);
       const role = accessRole(input.accessRole);
       const address = input.email == null || input.email === '' ? '' : email(input.email);
+      if(address) {
+        const account=get('SELECT personId FROM accounts WHERE email=?',address);
+        if(account&&activeMembership(input.projectId,account.personId))throw new AppError('该账号已是项目成员，请通过成员管理调整访问权限',409);
+      }
       let member = null;
       if (input.memberId !== undefined && input.memberId !== null && input.memberId !== '') {
         if (typeof input.memberId !== 'string') throw new AppError('成员标识不正确');
         member = get('SELECT * FROM project_members WHERE projectId=? AND memberId=?', input.projectId, input.memberId);
         if (!member) throw new AppError('没有找到这个项目成员', 404);
         if (person(member.personId).accountLinked) throw new AppError('该成员已经绑定账号', 409);
+        assertRoleTransition(input.projectId,member,role);
       }
       let targetPersonId = member?.personId || null;
       if (input.personId !== undefined && input.personId !== null && input.personId !== '') {

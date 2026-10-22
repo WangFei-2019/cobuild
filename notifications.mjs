@@ -18,12 +18,14 @@ export function deriveNotifications(identity,states,user,{now=new Date(),invitat
     const id=createHash('sha256').update(JSON.stringify([type,projectId,task?.id||'',evidence])).digest('hex');
     items.push({id,type,title:cut(title,220),description:cut(description,600),href:`/projects/${encodeURIComponent(projectId)}/${task?'tasks?task='+encodeURIComponent(task.id):'members'}`,
       createdAt:stamp(createdAt),projectId,projectName:cut(state.project.name,100),...(task?{taskId:task.id,taskCode:cut(task.code,30)}:{})});
+    if(['mention','reply'].includes(type)&&validId(evidence?.[0])){items.at(-1).href+='&discussion='+encodeURIComponent(evidence[0]);items.at(-1).discussionId=evidence[0];}
   };
   for(const state of states){
     const membership=identity?.membership(state.project.id,user.personId),memberId=membership?.memberId;
-    if(!state.members.some(member=>member.id===memberId))continue;
+    if(!state.members.some(member=>member.id===memberId&&member.active!==false))continue;
     const write=membership.accessRole!=='viewer';
     for(const task of state.tasks){
+      if(task.status==='canceled')continue;
       const owned=task.ownerId===memberId,reviewing=task.reviewerId===memberId,artifact=task.artifacts?.[0],label=`${task.code||''} ${task.title||''}`.trim();
       if(write&&reviewing&&task.status==='review'&&artifact)add('review',state,task,'等待你接收：'+label,'核对最新成果「'+cut(artifact.name,200)+'」后确认接收或退回修改。',[artifact.id||artifact.createdAt,task.reviewerId],artifact.createdAt||task.updatedAt);
       if(write&&owned&&task.status==='blocked')add('blocked',state,task,'你的任务受阻：'+label,task.blocker||'请核对阻碍并补充需要的协助。',[task.blocker,task.ownerId],task.updatedAt);
@@ -38,6 +40,17 @@ export function deriveNotifications(identity,states,user,{now=new Date(),invitat
         if(owned&&task.status==='doing'&&changes?.kind==='changes'&&changes.actorId!==memberId)add('changes_requested',state,task,'成果需要修改：'+label,changes.text,[changes.id],changes.createdAt);
       }
       if(write&&owned&&['todo','doing'].includes(task.status)&&!items.some(item=>item.projectId===state.project.id&&item.taskId===task.id&&['due','changes_requested'].includes(item.type)))add('assigned',state,task,'待你推进：'+label,task.deliverable||'请核对本任务的交付约定，并记录实际进展。',[task.ownerId],task.updatedAt);
+    }
+  }
+  for(const state of states){
+    const link=identity?.membership(state.project.id,user.personId),memberId=link?.memberId;
+    if(!state.members.some(member=>member.id===memberId&&member.active!==false))continue;
+    for(const entry of state.discussions||[]){
+      if(entry.authorId===memberId||!state.members.some(member=>member.id===entry.authorId))continue;
+      const task=state.tasks.find(item=>item.id===entry.taskId);if(!task||task.status==='canceled')continue;
+      const parent=entry.replyTo?(state.discussions||[]).find(item=>item.id===entry.replyTo&&item.taskId===entry.taskId):null;
+      const type=entry.mentionIds?.includes(memberId)?'mention':parent?.authorId===memberId?'reply':null;
+      if(type)add(type,state,task,type==='mention'?'有人在任务讨论中提到你':'你的任务讨论收到回复',entry.body,[entry.id],entry.createdAt);
     }
   }
   for(const invitation of invitations){

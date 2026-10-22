@@ -107,7 +107,7 @@ test('A/B独立注册各建私有项目，账号和项目权限隔离，接受�
   assert.equal((await a.request('/api/invitations/accept', { token })).status, 409);
   const accepted = await b.request('/api/invitations/accept', { token });
   assert.equal(accepted.status, 200); assert.equal(accepted.data.session.user.personId, b.user.personId);
-  assert.deepEqual(accepted.data.state.permissions, { manageProject: false, createTask: false, readOnly: true, canArchive: false });
+  assert.deepEqual(accepted.data.state.permissions, { manageProject: false, createTask: false, readOnly: true, canArchive: false, manageMembers: false, governance: false });
   assert.equal((await b.request('/api/action', { projectId: pa.project.id, type: 'addMember', name: '只读不可新增' })).status, 403);
   assert.equal((await b.request(`/api/state?projectId=${pb.project.id}`)).data.permissions.manageProject, true);
   assert.equal((await a.request(`/api/state?projectId=${pb.project.id}`)).status, 403);
@@ -160,8 +160,8 @@ test('跨项目未绑定档案认领在发出邀请和接受/注册时重查权�
   assert.equal(permissionInvite.status, 201); const permissionToken = new URL(permissionInvite.data.invitation.url).pathname.split('/').at(-1);
   database(db => db.prepare('UPDATE project_members SET accessRole=? WHERE projectId=? AND personId=?').run('member', a.project.id, owner.user.personId));
   const afterRoleChange = snapshot();
-  assert.equal((await claimant.request('/api/invitations/accept', { token: permissionToken })).status, 403);
-  assert.equal((await client()('/api/auth/register', { name: '不能使用过时授权', email: 'lost-permission@registration.test', password, inviteToken: permissionToken })).status, 403);
+  assert.equal((await claimant.request('/api/invitations/accept', { token: permissionToken })).status, 410);
+  assert.equal((await client()('/api/auth/register', { name: '不能使用过时授权', email: 'lost-permission@registration.test', password, inviteToken: permissionToken })).status, 410);
   assert.deepEqual(snapshot(), afterRoleChange);
   const trusted = await admin('/api/invitations', { projectId: a.project.id, memberId: target.id });
   assert.equal(trusted.status, 201);

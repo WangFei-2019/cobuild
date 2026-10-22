@@ -6,6 +6,7 @@ import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { applyAction, analyzeUpdate, projectReport, AppError } from './domain.mjs';
 import { createWorkspace } from './workspace.mjs';
 import { createIdentity } from './identity.mjs';
+import { memberImpact } from './membership.mjs';
 import { createMailer, mailUnavailable } from './mail.mjs';
 import { peopleSummary, personDetails, projectWithProfiles } from './people.mjs';
 import { dashboardSummary } from './dashboard.mjs';
@@ -88,7 +89,9 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
   function personVisible(personId) {
     return !virtualSamplePerson(personId) || identity.memberships(personId).some(link => workspace.isActive(link.projectId));
   }
-  identity = authRequired ? createIdentity(dataDir, { projectAvailable: id => workspace.isActive(id) && !isSampleState(workspace.storedState(id)), personVisible }) : null;
+  identity = authRequired ? createIdentity(dataDir, { projectAvailable: id => workspace.isActive(id) && !isSampleState(workspace.storedState(id)), personVisible,
+    memberAvailable:(projectId,memberId)=>{try{return workspace.storedState(projectId).members.some(member=>member.id===memberId&&member.active!==false);}catch{return false;}},
+    memberRoleAllowed:(projectId,memberId,role)=>role!=='viewer'||!workspace.storedState(projectId).tasks.some(task=>!['done','canceled'].includes(task.status)&&(task.ownerId===memberId||task.reviewerId===memberId)) }) : null;
   // Recover any interrupted cross-store operation before project JSON is read
   // or syncProject can treat an orphan member as an unbound legacy profile.
   try { workspace = createWorkspace(dataDir, { seedDemo, operationCommitted:identity ? id=>identity.operationCommitted(id) : undefined }); }
@@ -133,9 +136,9 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
   function permissions(state, user) {
     const membership = identity.membership(state.project.id, user.personId);
     const sample = isSampleState(state);
-    const manageProject = sample ? sampleOwner(state) === user.id : user.workspaceRole === 'admin' || membership?.accessRole === 'admin';
+    const manageProject = sample ? sampleOwner(state) === user.id : Boolean(membership&&(user.workspaceRole === 'admin' || membership.accessRole === 'admin'));
     const write = manageProject || membership?.accessRole === 'member';
-    return { manageProject, createTask:Boolean(write), readOnly:!write, canArchive:!sample&&manageProject, ...(sample ? {manageMembers:false} : {}) };
+    return { manageProject, createTask:Boolean(write), readOnly:!write, canArchive:!sample&&manageProject,manageMembers:!sample&&(user.workspaceRole==='admin'||membership?.accessRole==='admin'),governance:!sample&&user.workspaceRole==='admin'&&!membership };
   }
   function decoratedState(state, user) {
     if (!authRequired) return state;
@@ -186,12 +189,20 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       return value;
     })};
     if (stored.sample !== undefined) clean.sample = structuredClone(stored.sample); else delete clean.sample;
+    if(identity)for(const task of clean.tasks) {
+      if(['done','canceled'].includes(task.status))continue;
+      const previous=stored.tasks.find(item=>item.id===task.id),restored=previous&&['done','canceled'].includes(previous.status);
+      for(const field of ['ownerId','reviewerId'])if(!previous||restored||task[field]!==previous[field]) {
+        const member=clean.members.find(item=>item.id===task[field]),record=member&&identity.member(projectId,member.id);
+        if(!member||member.active===false||!record||record.active===false||record.accessRole==='viewer')throw new AppError('任务负责人与接收人必须是本项目仍有效的可协作成员');
+      }
+    }
     workspace.save(projectId,clean,{persist:identity ? effect=>identity.syncProject(clean,bindings,effect) : undefined});
     return clean;
   }
   function joinProject(projectId,person) {
     const current = workspace.state(projectId);
-    if (current.members.length >= 32) throw new AppError('项目最多支持 32 名成员');
+    if (current.members.filter(member=>member.active!==false).length >= 32) throw new AppError('项目最多支持 32 名有效成员');
     const memberId = `member-${randomUUID()}`;
     const next = structuredClone(current);
     next.members.push({id:memberId,name:person.name,role:'项目协作者',color:person.color,initial:person.initial});
@@ -207,6 +218,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       if (isSampleState(state)) continue;
       const existing = identity.membership(state.project.id,user.personId);
       if (existing && state.members.some(member => member.id === existing.memberId)) continue;
+      if(identity.departed(state.project.id,user.personId)||state.members.filter(member=>member.active!==false).length>=32)continue;
       const next = structuredClone(state), person = identity.person(user.personId), memberId = existing?.memberId || `manager-${randomUUID()}`;
       next.members.push({id:memberId,name:person.name,role:'工作区管理员',color:person.color,initial:person.initial});
       next.activities.unshift({id:`event-${randomUUID()}`,actorId:memberId,taskId:'',kind:'member',text:`工作区管理员${person.name}加入项目管理。`,createdAt:new Date().toISOString()});
@@ -348,7 +360,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       }
       if (pathname.startsWith('/api/')) {
         if (authRequired && !currentUser) throw new AppError('请先登录工作区',401);
-        if (currentUser && !pathname.startsWith('/api/samples')) ensureAdministratorMemberships(currentUser);
+        if (currentUser && !pathname.startsWith('/api/samples')&&pathname!=='/api/invitations/accept') ensureAdministratorMemberships(currentUser);
       }
       if (req.method === 'POST' && ['/api/samples','/api/samples/archive','/api/samples/restore'].includes(pathname)) {
         if (!identity) throw new AppError('示例生命周期需要登录账号',403);
@@ -441,11 +453,25 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
         return send(res,200,readFileSync(filePath),'application/octet-stream',{'Content-Disposition':`attachment; filename="artifact"; filename*=UTF-8''${encodeURIComponent(String(artifact.fileName).toWellFormed())}`});
       }
       if (req.method === 'POST' && pathname === '/api/projects') return send(res,201,createProject(await body(req),currentUser));
+      if(req.method==='GET'&&pathname==='/api/members/impact') {
+        if(!identity)throw new AppError('成员生命周期需要真实登录账号',403);
+        const context=access(queryProjectId(),currentUser),ids=url.searchParams.getAll('memberId');
+        if(ids.length!==1)throw new AppError('请指定一位项目成员');
+        return send(res,200,memberImpact(workspace.state(context.projectId),identity,currentUser,ids[0]));
+      }
+      if(req.method==='POST'&&pathname==='/api/members/action') {
+        if(!identity)throw new AppError('成员生命周期需要真实登录账号',403);
+        const input=await body(req,16*1024),context=access(input.projectId,currentUser);
+        identity.transitionMembers(workspace.state(context.projectId),currentUser,input,next=>workspace.stageSave(context.projectId,reconcileMilestones(next)));
+        const saved=workspace.state(context.projectId);
+        return send(res,200,{state:canRead(saved,currentUser)?decoratedState(saved,currentUser):null,workspace:workspaceView(currentUser)});
+      }
       if (req.method === 'POST' && pathname === '/api/project-members') {
         const input = await body(req), context = access(input.projectId,currentUser,{manage:true});
         requireSampleMembersFixed(context.state);
         if (!identity) throw new AppError('请使用真实账号模式添加已有人员');
         const person = selectablePerson(input.personId,currentUser), role = validRole(input.accessRole);
+        if(role==='admin'&&!person.accountLinked)throw new AppError('项目管理员必须绑定真实账号，请通过账号邀请授予管理权限');
         if (identity.membership(context.projectId,person.id)) throw new AppError('该人员已经是项目成员',409);
         if (person.accountLinked) throw new AppError('已有账号需要本人接受项目邀请后加入',403);
         const action = actingInput({...input,type:'addMember',name:person.name,role:input.role},context);
@@ -505,6 +531,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       }
       if (req.method === 'POST' && pathname === '/api/action') {
         const input = await body(req), context = access(input.projectId,currentUser,{write:true}), action = actingInput(input,context);
+        const actionState=['addDiscussion','resolveDiscussion'].includes(action.type)?authorizedState(context):context.state;
         if (['addMember','updateMember'].includes(action.type)) requireSampleMembersFixed(context.state);
         if (authRequired && ['addMember','updateMember','updateProject'].includes(action.type) && !context.permissions.manageProject) throw new AppError('请由项目管理者进行此操作',403);
         if (action.type === 'updateMember' && !Number.isSafeInteger(action.expectedRevision)) throw new AppError('请提供成员编辑所依据的项目版本');
@@ -518,12 +545,12 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
             if (content.toString('base64') !== file.base64) throw new AppError('文件编码不完整，请重新选择文件');
             const fileId = randomUUID(); filePath = join(dataDir,'files',fileId);
             action.url = `/api/files/${fileId}`; action.fileMeta = {name:basename(file.name).replace(/[\r\n]/g,''),size:content.length};
-            const next = reconcileMilestones(applyAction(context.state,action,authRequired ? {manageProject:context.permissions.manageProject} : {}));
+            const next = reconcileMilestones(applyAction(actionState,action,authRequired ? {manageProject:context.permissions.manageProject} : {}));
             writeFileSync(filePath,content,{mode:0o600}); saveState(context.projectId,next);
           } else {
             delete action.fileMeta;
             if (action.type === 'submitArtifact' && typeof action.url === 'string' && action.url.startsWith('/api/')) throw new AppError('请通过文件选择器上传本地文件');
-            const next = reconcileMilestones(applyAction(context.state,action,authRequired ? {manageProject:context.permissions.manageProject} : {}));
+            const next = reconcileMilestones(applyAction(actionState,action,authRequired ? {manageProject:context.permissions.manageProject} : {}));
             saveState(context.projectId,next);
           }
           return send(res,200,{state:decoratedState(workspace.state(context.projectId),currentUser)});
@@ -543,7 +570,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       const publicDir = resolve(ROOT,'public'), file = resolve(publicDir,relative);
       if (!file.startsWith(`${publicDir}/`) || !existsSync(file) || !statSync(file).isFile()) throw new AppError('页面或文件不存在',404);
       send(res,200,req.method === 'HEAD' ? '' : readFileSync(file),TYPES[extname(file)] || 'application/octet-stream',{'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});
-    } catch (error) { send(res,error.status || 500,{error:error.status ? error.message : '服务处理失败，请查看服务日志',...(['DUPLICATE_PERSON_NAME','EMAIL_TAKEN','NAME_TAKEN','MAIL_NOT_CONFIGURED','MAIL_DELIVERY_FAILED','TOKEN_INVALID','CURRENT_PASSWORD_INVALID','CREDENTIALS_CHANGED'].includes(error.code)?{code:error.code}:{}),...(['email','name','currentPassword'].includes(error.field)?{field:error.field}:{})},undefined,error.retryAfter ? {'Retry-After':String(error.retryAfter)} : {}); if (!error.status) process.stderr.write(`${error.stack}\n`); }
+    } catch (error) { send(res,error.status || 500,{error:error.status ? error.message : '服务处理失败，请查看服务日志',...(['DUPLICATE_PERSON_NAME','EMAIL_TAKEN','NAME_TAKEN','MAIL_NOT_CONFIGURED','MAIL_DELIVERY_FAILED','TOKEN_INVALID','CURRENT_PASSWORD_INVALID','CREDENTIALS_CHANGED','LAST_PROJECT_ADMIN','MEMBER_HAS_RESPONSIBILITIES','PROJECT_REVISION_CONFLICT'].includes(error.code)?{code:error.code}:{}),...(['email','name','currentPassword'].includes(error.field)?{field:error.field}:{})},undefined,error.retryAfter ? {'Retry-After':String(error.retryAfter)} : {}); if (!error.status) process.stderr.write(`${error.stack}\n`); }
   });
   server.on('close',() => {mailer.close();identity?.close();notifications?.close();});
   return server;

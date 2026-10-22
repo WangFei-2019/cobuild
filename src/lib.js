@@ -1,6 +1,9 @@
 import {useEffect,useRef,useState} from 'react';
-export const STATUS={todo:'待开始',doing:'进行中',blocked:'受阻',review:'待交接',done:'已完成'};
-export const STATUS_COLOR={todo:'default',doing:'processing',blocked:'warning',review:'purple',done:'success'};
+export const STATUS={todo:'待开始',doing:'进行中',blocked:'受阻',review:'待交接',done:'已完成',canceled:'已取消'};
+export const STATUS_COLOR={todo:'default',doing:'processing',blocked:'warning',review:'purple',done:'success',canceled:'default'};
+export const memberIsActive=member=>Boolean(member)&&member.active!==false;
+export const activeMembers=state=>(state?.members||[]).filter(memberIsActive);
+export const taskIsOpen=task=>Boolean(task)&&!['done','canceled'].includes(task.status);
 export const PRIORITY={high:'高',medium:'普通',low:'低'};
 export const PRIORITY_ORDER={high:0,medium:1,low:2};
 export const isDemo=typeof __COBUILD_DEMO__!=='undefined'&&__COBUILD_DEMO__;

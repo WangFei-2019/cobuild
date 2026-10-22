@@ -51,7 +51,7 @@ function stateShape(state) {
   if (!state?.project || !Array.isArray(state.members) || !Array.isArray(state.tasks) || !Number.isSafeInteger(state.revision)) throw new AppError('项目状态无法用于规划');
 }
 function member(state, id) {
-  if (typeof id !== 'string' || !state.members.some(item => item.id === id)) throw new AppError('规划包含不存在的项目成员', 403);
+  if (typeof id !== 'string' || !state.members.some(item => item.id === id && item.active!==false && item.accessRole!=='viewer')) throw new AppError('规划包含不存在的项目成员', 403);
   return id;
 }
 function revision(state, expected) {
@@ -133,7 +133,7 @@ export function validatePlanDraft(state, raw) {
 }
 
 function milestoneFingerprint(state, milestone) {
-  const tasks = state.tasks.filter(task => task.milestoneId === milestone.id).sort((a, b) => a.id.localeCompare(b.id));
+  const tasks = state.tasks.filter(task => task.milestoneId === milestone.id && task.status!=='canceled').sort((a, b) => a.id.localeCompare(b.id));
   const data = {
     id: milestone.id, title: milestone.title, goal: milestone.goal, due: milestone.due, acceptanceCriteria: milestone.acceptanceCriteria,
     tasks: tasks.map(task => ({
@@ -163,7 +163,7 @@ export function reconcileMilestones(state) {
   if (!Array.isArray(next.milestones)) throw new AppError('里程碑数据格式不正确');
   for (const milestone of next.milestones) {
     if (milestone.status !== 'accepted' && !milestone.acceptedAt) continue;
-    const tasks = next.tasks.filter(item => item.milestoneId === milestone.id);
+    const tasks = next.tasks.filter(item => item.milestoneId === milestone.id && item.status!=='canceled');
     const allAccepted = tasks.length > 0 && tasks.every(item => item.status === 'done' && item.acceptedAt && item.artifacts?.length && !item.needsResubmission);
     if (!allAccepted || milestone.acceptanceFingerprint !== milestoneFingerprint(next, milestone)) {
       invalidate(milestone, '里程碑约定、关联任务或交付成果已变化，请重新验收。', stamp());
@@ -211,9 +211,12 @@ function assignTasks(state, milestone, ids, at) {
   for (const id of selected) {
     const task = state.tasks.find(item => item.id === id);
     if (!task) throw new AppError('关联任务不属于当前项目');
+    if(task.status==='canceled'&&task.milestoneId!==milestone.id)throw new AppError('取消任务只能保留原有阶段关联，请先恢复再调整');
+    if(task.status==='canceled')continue;
     if (task.due && task.due > milestone.due) throw new AppError('关联任务截止日期不能晚于里程碑');
   }
   for (const task of state.tasks) {
+    if(task.status==='canceled')continue;
     if (selected.has(task.id) && task.milestoneId !== milestone.id) { task.milestoneId = milestone.id; task.updatedAt = at; }
     else if (task.milestoneId === milestone.id && !selected.has(task.id)) { delete task.milestoneId; task.updatedAt = at; }
   }
@@ -241,7 +244,7 @@ export function applyMilestoneAction(state, input) {
     if (!Object.keys(input.patch).length) throw new AppError('请提供需要修改的里程碑信息');
     const fields = milestoneFields({ ...milestone, ...input.patch }, next);
     Object.assign(milestone, fields, { updatedAt: at });
-    assignTasks(next, milestone, input.patch.taskIds ?? next.tasks.filter(item => item.milestoneId === milestone.id).map(item => item.id), at);
+    assignTasks(next, milestone, input.patch.taskIds ?? next.tasks.filter(item => item.milestoneId === milestone.id && item.status!=='canceled').map(item => item.id), at);
     activity(next, input.actorId, 'milestone', '更新里程碑「' + milestone.title + '」的约定。', at);
   } else if (input.type === 'acceptMilestone') {
     object(input, '验收里程碑', ['type', 'actorId', 'expectedRevision', 'projectId', 'milestoneId', 'note'], ['milestoneId', 'note']);
@@ -249,7 +252,7 @@ export function applyMilestoneAction(state, input) {
     if (!milestone) throw new AppError('没有找到这个里程碑', 404);
     const note = text(input.note, '里程碑验收说明', 2000);
     if (milestone.status === 'accepted') throw new AppError('这个里程碑已经验收', 409);
-    const tasks = next.tasks.filter(item => item.milestoneId === milestone.id);
+    const tasks = next.tasks.filter(item => item.milestoneId === milestone.id && item.status!=='canceled');
     if (!tasks.length || tasks.some(item => !taskHasConfirmedHandoff(item))) throw new AppError('至少关联一项任务，且全部任务均由接收人确认交接后，才能验收里程碑', 409);
     assignTasks(next, milestone, tasks.map(item => item.id), at);
     milestone.status = 'accepted'; milestone.acceptedAt = at; milestone.acceptedBy = input.actorId;
@@ -317,7 +320,7 @@ async function generateDraft(state, input, replan = false) {
   const request = { goal: text(input.goal, '项目目标', 6000), deadline: date(input.deadline || snapshot.project.deadline, '规划截止日期', false), scope: text(input.scope, '项目范围', 6000, false), constraints: text(input.constraints, '项目约束', 6000, false) };
   let context = {
     project: { name: snapshot.project.name, description: snapshot.project.description || '', goal: snapshot.project.goal || '', deadline: snapshot.project.deadline || '' },
-    members: snapshot.members.map(({ id, name, role }) => ({ id, name, role })),
+    members: snapshot.members.filter(item=>item.active!==false&&item.accessRole!=='viewer').map(({ id, name, role }) => ({ id, name, role })),
     existingTasks: snapshot.tasks.map(({ id, title, status, due, deliverable, milestoneId }) => ({ id, title, status, due, deliverable, milestoneId }))
   };
   if (replan) context = replanContext(snapshot, context);
@@ -441,7 +444,7 @@ function normalizedReplan(state, raw) {
       const task = state.tasks.find(item => item.id === oldId);
       if (!task) throw new AppError('要调整的任务不属于当前项目');
       if (matchedTasks.has(oldId)) throw new AppError('同一个原任务不能被重复关联');
-      if (protectedIds.tasks.has(oldId)) throw new AppError('已交付、待验收或已经接收的任务不能重规划');
+      if (protectedIds.tasks.has(oldId)) throw new AppError('已取消、已交付、待验收或已经接收的任务不能重规划');
       matchedTasks.add(oldId);
     }
     const due = date(value.due, '任务截止日期');
@@ -463,6 +466,7 @@ function checkReplanSchedule(state) {
     if (item.due) beforeProjectDeadline(state, date(item.due, '里程碑日期'), '里程碑日期');
   }
   for (const item of tasks.values()) {
+    if(item.status==='canceled')continue;
     if (item.due) beforeProjectDeadline(state, date(item.due, '任务截止日期'), '任务截止日期');
     if (item.milestoneId) {
       const milestone = milestones.get(item.milestoneId);
@@ -479,7 +483,7 @@ function checkReplanSchedule(state) {
     for (const predecessorId of current.dependsOn || []) {
       const predecessor = tasks.get(predecessorId);
       if (!predecessor) throw new AppError('任务依赖不属于当前项目');
-      if (current.due && predecessor.due && predecessor.due > current.due) throw new AppError('前置任务截止日期不能晚于后续任务');
+      if (current.status!=='canceled' && predecessor.status!=='canceled' && current.due && predecessor.due && predecessor.due > current.due) throw new AppError('前置任务截止日期不能晚于后续任务');
       visit(predecessorId);
     }
     visiting.delete(id); visited.add(id);
@@ -545,6 +549,7 @@ function prepareReplan(state, raw) {
       ...Object.fromEntries(REPLAN_TASK_FIELDS.filter(field => !['dependsOn', 'milestoneId'].includes(field)).map(field => [field, value[field]])),
       dependsOn: value.dependsOn.map(id => resolve(id, taskIds, oldTasks, '依赖任务')), milestoneId
     };
+    if(fields.dependsOn.some(id=>oldTasks.get(id)?.status==='canceled'&&!previous?.dependsOn?.includes(id)))throw new AppError('不能在新计划中新增对已取消任务的依赖');
     if (new Set(fields.dependsOn).size !== fields.dependsOn.length) throw new AppError('依赖在映射后重复，请只保留一个引用');
     if (previous) updateEntity('task', next.tasks.find(item => item.id === previous.id), fields, REPLAN_TASK_FIELDS);
     else {

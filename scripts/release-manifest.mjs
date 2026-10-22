@@ -17,7 +17,7 @@ const publicFiles = new Set([
 const traversedDirectories = new Set(['src', 'public', 'scripts', 'tests', '.github', 'demo']);
 export const REQUIRED_RELEASE_FILES = Object.freeze([
   'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'server.mjs', 'domain.mjs',
-  'workspace.mjs', 'identity.mjs', 'mail.mjs', 'notifications.mjs', 'notification-store.mjs', 'people.mjs', 'dashboard.mjs', 'planning.mjs', 'insights.mjs', 'ai-exchange.mjs', 'tests/insights.test.mjs',
+  'workspace.mjs', 'identity.mjs', 'membership.mjs', 'mail.mjs', 'notifications.mjs', 'notification-store.mjs', 'people.mjs', 'dashboard.mjs', 'planning.mjs', 'insights.mjs', 'ai-exchange.mjs', 'tests/insights.test.mjs',
   'scripts/build.mjs', 'scripts/start.mjs', 'scripts/runtime-config.mjs', 'scripts/doctor.mjs', 'scripts/backup.mjs', 'scripts/licenses.mjs',
   'scripts/package-release.mjs', 'scripts/release-manifest.mjs', 'scripts/verify-release.mjs',
   'public/index.html', 'public/app.js', 'public/app.css', 'public/THIRD_PARTY_NOTICES.txt',

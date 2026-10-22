@@ -2,7 +2,7 @@ import React from 'react';
 import {Button, Empty, Progress, Tag} from 'antd';
 import {ArrowRightOutlined, CheckCircleOutlined, EditOutlined, FlagOutlined, PlusOutlined, TeamOutlined} from '@ant-design/icons';
 import {deriveProjectInsights} from '../insights.mjs';
-import {canCreate, canManage, dateLabel, safeColor} from './lib.js';
+import {activeMembers, canCreate, canManage, dateLabel, safeColor, taskIsOpen} from './lib.js';
 import {ActivityList, Person, StatusTag} from './shared.jsx';
 
 export default function ProjectOverview({state, onOpen, onTab, onNewTask, onAddMember, onEdit, onPlan}) {
@@ -10,8 +10,8 @@ export default function ProjectOverview({state, onOpen, onTab, onNewTask, onAddM
   const {counts, health} = insight;
   const complete = counts.total ? Math.round(counts.verifiedDone / counts.total * 100) : 0;
   const taskIds = [...new Set(insight.suggestions.map(item => item.taskId).filter(Boolean))];
-  const ordered = [...taskIds.map(id => state.tasks.find(task => task.id === id)), ...state.tasks.filter(task => task.status !== 'done')]
-    .filter((task, index, all) => task && all.findIndex(item => item?.id === task.id) === index).slice(0, 4);
+  const ordered = [...taskIds.map(id => state.tasks.find(task => task.id === id)), ...state.tasks.filter(taskIsOpen)]
+    .filter((task, index, all) => task && task.status!=='canceled' && all.findIndex(item => item?.id === task.id) === index).slice(0, 4);
   const missing = !state.project.goal ? {title:'先让大家对结果有相同的理解', text:'写清楚这次准备交付什么、由谁确认，让后续分工有共同的依据。', action:'补充共同目标', run:onEdit}
     : !state.milestones?.length ? {title:'给目标一个可以验收的阶段', text:'先约定第一个阶段的结果和检查标准，再把它拆成具体任务。', action:'制定第一个里程碑', run:() => onTab('milestones')}
     : !state.tasks.length ? {title:'把第一个阶段落到一个人和一份成果', text:'创建一项有负责人、接收人和交付约定的任务，开始实际推进。', action:'建立第一项分工', run:onNewTask} : null;
@@ -37,7 +37,7 @@ export default function ProjectOverview({state, onOpen, onTab, onNewTask, onAddM
         <section className="prj-panel">
           <div className="prj-section-heading"><div><h2>当前需关注的任务</h2></div><Button type="text" onClick={() => onTab('tasks')}>全部任务 <ArrowRightOutlined/></Button></div>
           {ordered.length ? <div className="prj-focus-list">{ordered.map(task => <button className="prj-focus-task" key={task.id} onClick={() => onOpen(task.id)}><span className={`prj-task-indicator ${task.status}`}><CheckCircleOutlined/></span><span className="prj-focus-task-copy"><span className="prj-task-code">{task.code}</span><strong>{task.title}</strong><span className="prj-task-description">{task.status === 'blocked' ? task.blocker || '请补充需要的帮助' : task.status === 'review' ? '已提交成果，等待约定接收人检查' : task.deliverable || '交付约定待补充'}</span><span className="prj-focus-task-meta"><Person id={task.ownerId} members={state.members} size={20}/><span>{task.due ? `${dateLabel(task.due)} 截止` : '期限待约定'}</span></span></span><span className="prj-focus-task-end"><StatusTag value={task.status}/><ArrowRightOutlined/></span></button>)}</div>
-            : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={state.tasks.length ? '所有任务都已标记完成，继续核对阶段验收。' : '还没有任务，从一份具体交付开始。'}><Button type="primary" icon={<PlusOutlined/>} disabled={!canCreate(state)} onClick={onNewTask}>新建任务</Button></Empty>}
+            : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={state.tasks.some(task=>task.status!=='canceled') ? '当前有效任务已标记完成，继续核对阶段验收。' : state.tasks.length ? '当前任务均已取消，可查看历史或重新安排分工。' : '还没有任务，从一份具体交付开始。'}><Button type="primary" icon={<PlusOutlined/>} disabled={!canCreate(state)} onClick={onNewTask}>新建任务</Button></Empty>}
           <p className="prj-footnote">顺序依据受阻、期限与待交接记录整理，可在副驾中查看具体依据。</p>
         </section>
         <section className="prj-panel">
@@ -49,7 +49,7 @@ export default function ProjectOverview({state, onOpen, onTab, onNewTask, onAddM
       </div>
       <aside className="prj-overview-aside">
 
-        <section className="prj-panel"><div className="prj-section-heading"><h2>成员与分工</h2><Button type="text" size="small" onClick={() => onTab('members')} aria-label="查看项目成员"><TeamOutlined/></Button></div><div className="prj-team-list">{state.members.map(person => <div className="prj-team-person" key={person.id}><Person id={person.id} members={state.members} size={32}/><span><small>{person.role || '项目协作者'}</small><strong>{state.tasks.filter(task => task.ownerId === person.id && task.status !== 'done').length} 项负责未完成</strong></span></div>)}</div>{state.permissions?.manageMembers!==false&&<Button block icon={<PlusOutlined/>} disabled={!canManage(state)} onClick={onAddMember}>添加伙伴</Button>}</section>
+        <section className="prj-panel"><div className="prj-section-heading"><h2>成员与分工</h2><Button type="text" size="small" onClick={() => onTab('members')} aria-label="查看项目成员"><TeamOutlined/></Button></div><div className="prj-team-list">{activeMembers(state).map(person => <div className="prj-team-person" key={person.id}><Person id={person.id} members={state.members} size={32}/><span><small>{person.role || '项目协作者'}</small><strong>{state.tasks.filter(task => task.ownerId === person.id && taskIsOpen(task)).length} 项负责未完成</strong></span></div>)}</div>{state.permissions?.manageMembers!==false&&<Button block icon={<PlusOutlined/>} disabled={!canManage(state)} onClick={onAddMember}>添加伙伴</Button>}</section>
         {state.decisions?.length > 0 && <section className="prj-panel"><div className="prj-section-heading"><h2>项目约定</h2><span className="prj-muted">{state.decisions.length} 条</span></div>{state.decisions.map(decision => <article className="prj-decision" key={decision.id}><strong>{decision.title}</strong><p>{decision.detail}</p></article>)}</section>}
       </aside>
     </div>

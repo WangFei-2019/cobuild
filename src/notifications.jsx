@@ -6,7 +6,7 @@ import {navigate,parseRoute,safeNextPath} from './router.js';
 import {PageHeading,ResourceState} from './pages.jsx';
 import './notifications.css';
 
-const TYPES={assigned:'待我推进',review:'待我验收',blocked:'受阻事项',due:'期限提醒',handoff_accepted:'交接已接收',changes_requested:'退回修改',invitation_accepted:'伙伴已加入'};
+const TYPES={mention:'有人 @ 我',reply:'讨论有回复',assigned:'待我推进',review:'待我验收',blocked:'受阻事项',due:'期限提醒',handoff_accepted:'交接已接收',changes_requested:'退回修改',invitation_accepted:'伙伴已加入'};
 export function notificationTarget(href){const path=safeNextPath(href,'');return path&&parseRoute(new URL(path,location.origin)).kind==='project'?path:'';}
 
 export function useNotifications(onUnauthorized){

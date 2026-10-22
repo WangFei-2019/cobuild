@@ -35,6 +35,7 @@ export function checkProfileDuplicates(people, name, { excludingId, allowDuplica
 // Profiles are authoritative display data; historical project records stay intact.
 export function projectWithProfiles(state, identity) {
   return { ...state, members: state.members.map(member => {
+    if(member.active===false)return {...member};
     const link = identity.member(state.project.id, member.id);
     if (!link) return { ...member };
     const person = identity.person(link.personId);
@@ -49,12 +50,13 @@ function projectInfo(state) {
 }
 
 function artifactsFor(state, memberId) {
+  const memberIds=new Set(Array.isArray(memberId)?memberId:[memberId]);
   const result = [];
   const project = projectInfo(state);
   for (const task of state.tasks) {
     for (const [index, artifact] of (task.artifacts || []).entries()) {
       const explicit = typeof artifact.submittedBy === 'string' && Boolean(artifact.submittedBy);
-      if ((explicit ? artifact.submittedBy : task.ownerId) !== memberId) continue;
+      if (!memberIds.has(explicit ? artifact.submittedBy : task.ownerId)) continue;
       const isLatest = index === 0;
       const accepted = isLatest && task.status === 'done' && Boolean(task.acceptedAt);
       result.push({ ...artifact, project, taskId: task.id, taskCode: task.code, taskTitle: task.title, taskStatus: task.status,
@@ -64,16 +66,17 @@ function artifactsFor(state, memberId) {
         attributionLabel: explicit ? '本人提交' : '历史记录 · 按任务归属' });
     }
   }
-  return result;
+  return [...new Map(result.map((artifact,index)=>[artifact.id||`${artifact.taskId}:${index}`,artifact])).values()];
 }
 
 function statsFor(state, memberId) {
-  const owned = state.tasks.filter(task => task.ownerId === memberId);
+  const memberIds=new Set(Array.isArray(memberId)?memberId:[memberId]);
+  const owned = state.tasks.filter(task => memberIds.has(task.ownerId) && task.status!=='canceled');
   const doneCount = owned.filter(task => task.status === 'done').length;
-  return { taskCount: owned.length, doneCount,
+  return { taskCount: owned.length, doneCount, canceledCount:state.tasks.filter(task=>memberIds.has(task.ownerId)&&task.status==='canceled').length,
     blockedCount: owned.filter(task => task.status === 'blocked').length,
     reviewCount: owned.filter(task => task.status === 'review').length,
-    toReviewCount: state.tasks.filter(task => task.reviewerId === memberId && task.status === 'review').length,
+    toReviewCount: state.tasks.filter(task => memberIds.has(task.reviewerId) && task.status === 'review').length,
     artifactCount: artifactsFor(state, memberId).length,
     progress: owned.length ? Math.round(doneCount / owned.length * 100) : null };
 }
@@ -83,18 +86,19 @@ function participationIndex(identity, visibleStates) {
   for (const state of visibleStates) {
     const project = projectInfo(state);
     for (const member of state.members) {
-      const link = identity.member(state.project.id, member.id);
-      if (!link) continue;
-      const rows = byPerson.get(link.personId) || [];
-      rows.push({ state, member, project, stats: statsFor(state, member.id), accessRole: link.accessRole || 'member' });
-      byPerson.set(link.personId, rows);
+      const link = identity.member(state.project.id, member.id);if(!link)continue;
+      let projects=byPerson.get(link.personId);if(!projects){projects=new Map();byPerson.set(link.personId,projects);}
+      let row=projects.get(project.id);
+      if(!row){row={state,member,project,memberIds:[],accessRole:link.accessRole||'member'};projects.set(project.id,row);}
+      if(!row.memberIds.includes(member.id))row.memberIds.push(member.id);
+      if(row.member.active===false&&member.active!==false){row.member=member;row.accessRole=link.accessRole||'member';}
     }
   }
-  return byPerson;
+  return new Map([...byPerson].map(([personId,projects])=>[personId,[...projects.values()].map(row=>({...row,stats:statsFor(row.state,row.memberIds)}))]));
 }
 
 function summary(rows) {
-  const total = { projectCount: rows.length, taskCount: 0, doneCount: 0, blockedCount: 0, reviewCount: 0, toReviewCount: 0, artifactCount: 0 };
+  const total = { projectCount: rows.length, taskCount: 0, doneCount: 0, blockedCount: 0, reviewCount: 0, toReviewCount: 0, artifactCount: 0,canceledCount:0 };
   for (const row of rows) for (const field of Object.keys(total)) if (field !== 'projectCount') total[field] += row.stats[field] || 0;
   return { ...total, progress: total.taskCount ? Math.round(total.doneCount / total.taskCount * 100) : null };
 }
@@ -109,7 +113,7 @@ export function peopleSummary(identity, visibleStates, currentUser) {
     const rows = byPerson.get(person.id) || [];
     if (!canSee(currentUser, person.id, rows)) return [];
     return [{ ...person, ...summary(rows), projects: rows.map(row => ({ ...row.project, role: row.member.role,
-      memberId: row.member.id, accessRole: row.accessRole, ...row.stats })) }];
+      memberId: row.member.id,memberIds:[...row.memberIds],historicalMemberIds:row.memberIds.filter(id=>id!==row.member.id),active:row.member.active!==false,leftAt:row.member.leftAt||'', accessRole: row.accessRole, ...row.stats })) }];
   });
 }
 
@@ -119,20 +123,21 @@ export function personDetails(identity, visibleStates, currentUser, personId) {
   if (!canSee(currentUser, personId, rows)) throw new AppError('没有找到这个成员档案', 404);
   const tasks = [], artifacts = [], activities = [];
   for (const row of rows) {
-    const { state, member, project } = row;
+    const { state, member, project } = row,memberIds=new Set(row.memberIds);
     for (const task of state.tasks) {
-      const owner = task.ownerId === member.id, reviewer = task.reviewerId === member.id;
-      const contributor = (task.artifacts || []).some(artifact => artifact.submittedBy === member.id);
+      const owner = memberIds.has(task.ownerId), reviewer = memberIds.has(task.reviewerId);
+      const contributor = (task.artifacts || []).some(artifact => memberIds.has(artifact.submittedBy));
       if (!owner && !reviewer && !contributor) continue;
       tasks.push({ ...structuredClone(task), project,
         relation: owner && reviewer ? 'owner-reviewer' : owner ? 'owner' : reviewer ? 'reviewer' : 'contributor' });
     }
-    artifacts.push(...artifactsFor(state, member.id));
-    activities.push(...state.activities.filter(item => item.actorId === member.id).map(item => ({ ...item, project })));
+    artifacts.push(...artifactsFor(state, row.memberIds));
+    activities.push(...state.activities.filter(item => memberIds.has(item.actorId)).map(item => ({ ...item, project })));
   }
+  const unique=values=>[...new Map(values.map((item,index)=>[item.project.id+':'+(item.id||String(index)),item])).values()];
   const recentFirst = (a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
   artifacts.sort(recentFirst); activities.sort(recentFirst);
   return { person, summary: summary(rows),
-    projects: rows.map(row => ({ project: row.project, memberId: row.member.id, role: row.member.role, accessRole: row.accessRole, stats: row.stats })),
-    tasks, artifacts, activities };
+    projects: rows.map(row => ({ project: row.project, memberId: row.member.id,memberIds:[...row.memberIds],historicalMemberIds:row.memberIds.filter(id=>id!==row.member.id),active:row.member.active!==false,leftAt:row.member.leftAt||'', role: row.member.role, accessRole: row.accessRole, stats: row.stats })),
+    tasks:unique(tasks), artifacts:unique(artifacts), activities:unique(activities) };
 }

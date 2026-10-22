@@ -9,7 +9,24 @@ const validId = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const validState = value => record(value) && value.schemaVersion === 1 && Number.isSafeInteger(value.revision) && value.revision > 0
   && record(value.project) && validId(value.project.id)
-  && ['members', 'tasks', 'activities', 'decisions'].every(key => Array.isArray(value[key]));
+  && ['members', 'tasks', 'activities', 'decisions'].every(key => Array.isArray(value[key]))
+  && validDiscussions(value);
+
+function validDiscussions(state){
+  if(state.discussions===undefined)return true;
+  if(!Array.isArray(state.discussions)||state.discussions.length>1000)return false;
+  const ids=new Set(),perTask=new Map(),memberIds=new Set(state.members.map(item=>item.id));
+  for(const entry of state.discussions){
+    if(!record(entry)||!validId(entry.id)||ids.has(entry.id)||!state.tasks.some(task=>task.id===entry.taskId)||!memberIds.has(entry.authorId)
+      ||typeof entry.body!=='string'||!entry.body.trim()||entry.body.length>4000||!['comment','question'].includes(entry.kind)
+      ||!Array.isArray(entry.mentionIds)||entry.mentionIds.length>20||new Set(entry.mentionIds).size!==entry.mentionIds.length||entry.mentionIds.some(id=>!memberIds.has(id))
+      ||typeof entry.createdAt!=='string'||!Number.isFinite(Date.parse(entry.createdAt)))return false;
+    if(entry.replyTo!==null&&(!validId(entry.replyTo)||!state.discussions.some(parent=>parent.id===entry.replyTo&&parent.taskId===entry.taskId)||entry.kind==='question'))return false;
+    if(entry.resolved!==false&&(!record(entry.resolved)||entry.kind!=='question'||entry.replyTo!==null||!memberIds.has(entry.resolved.actorId)||!Number.isFinite(Date.parse(entry.resolved.createdAt))))return false;
+    ids.add(entry.id);const count=(perTask.get(entry.taskId)||0)+1;if(count>200)return false;perTask.set(entry.taskId,count);
+  }
+  return true;
+}
 
 function writeAtomic(path, value) {
   const temp = `${path}.${randomUUID()}.tmp`;
@@ -180,11 +197,11 @@ export function createWorkspace(dataDir, { seedDemo = false, operationCommitted 
         return {
           id, name: p.name, description: p.description || '', goal: p.goal || '', deadline: p.deadline || '', stage: p.stage || '',
           color: p.color || state.members.find(member => member.id === 'm0')?.color || COLORS[0], createdAt: p.createdAt || '',
-          ownerName: state.members.find(member => member.id === 'm0')?.name || '', memberCount: state.members.length, taskCount: state.tasks.length,
+          ownerName: state.members.find(member => member.id === 'm0')?.name || '', memberCount: state.members.filter(member=>member.active!==false).length, taskCount: state.tasks.filter(task=>task.status!=='canceled').length, canceledCount:state.tasks.filter(task=>task.status==='canceled').length,
           doneCount: state.tasks.filter(task => task.status === 'done').length,
           blockedCount: state.tasks.filter(task => task.status === 'blocked').length,
           reviewCount: state.tasks.filter(task => task.status === 'review').length,
-          members: state.members.map(({ id, name, role, color, initial }) => ({ id, name, role, color, initial }))
+          members: state.members.filter(member=>member.active!==false).map(({ id, name, role, color, initial }) => ({ id, name, role, color, initial }))
         };
       })
     };
@@ -309,7 +326,7 @@ export function createWorkspace(dataDir, { seedDemo = false, operationCommitted 
         next = seedState(); next.project.id = id;
       } else {
         next = structuredClone(current);
-        next.tasks = []; next.decisions = []; next.milestones = [];
+        next.tasks = []; next.decisions = []; next.milestones = [];next.discussions=[];
         next.activities = [{ id: `event-${randomUUID()}`, actorId: 'm0', taskId: '', kind: 'reset', text: `清空项目「${next.project.name}」的任务与交接记录。`, createdAt: new Date().toISOString() }];
       }
       next.revision = current.revision + 1;

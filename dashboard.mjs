@@ -22,9 +22,10 @@ export function dashboardSummary(identity, states, currentUser, { query = '', no
     const p = state.project;
     const project = { id: p.id, name: p.name, color: p.color || state.members.find(member => member.id === 'm0')?.color || '#427b68' };
     const membership = currentUser?.personId ? identity?.membership(p.id, currentUser.personId) : null;
-    const currentMemberId = state.members.some(member => member.id === membership?.memberId) ? membership.memberId : null;
+    const currentMemberId = state.members.some(member => member.id === membership?.memberId && member.active!==false) ? membership.memberId : null;
     const memberInfo = id => ({ id, name: state.members.find(member => member.id === id)?.name || '未分配' });
     for (const task of state.tasks) {
+      if(task.status==='canceled')continue;
       const owned = Boolean(currentMemberId && task.ownerId === currentMemberId);
       const reviewing = Boolean(currentMemberId && task.reviewerId === currentMemberId);
       const unfinished = task.status !== 'done', due = task.due || '';

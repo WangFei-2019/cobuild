@@ -18,6 +18,7 @@ function taskKey(task){return JSON.stringify([task.project.id,task.id]);}
 function compareTasks(a,b){return String(a.due||'9999-99-99').localeCompare(String(b.due||'9999-99-99'))||String(a.code||'').localeCompare(String(b.code||''))||String(a.id).localeCompare(String(b.id));}
 function personalMode(task,mode){
  const owner=['owner','owner-reviewer'].includes(task.relation),reviewer=['reviewer','owner-reviewer'].includes(task.relation);
+ if(task.status==='canceled')return false;
  if(mode==='owned')return owner&&task.status!=='done';
  if(mode==='review')return reviewer&&task.status==='review';
  if(mode==='blocked')return owner&&task.status==='blocked';
@@ -38,6 +39,7 @@ export function deriveWorkModel(value,{projectId,timeFilter='any',mode='owned',q
 }
 export function taskNextAction(task){
  const owner=['owner','owner-reviewer'].includes(task.relation),reviewer=['reviewer','owner-reviewer'].includes(task.relation);
+ if(task.status==='canceled')return {label:'查看取消记录',description:'已取消，不计入待办或完成进度；可查看原因与历史。',kind:'history'};
  if(task.status==='done')return {label:'查看交接记录',description:'已标记完成，核对成果与交接记录。',kind:'history'};
  if(reviewer&&task.status==='review')return {label:'查看待验收成果',description:'对照约定检查成果，再确认接收或退回。',kind:'review'};
  if(owner&&task.status==='blocked')return {label:'处理受阻',description:'核对阻塞原因，说明需要谁提供什么协助。',kind:'blocked'};
