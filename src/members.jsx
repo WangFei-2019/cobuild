@@ -66,7 +66,7 @@ export function MemberManager({state,metadata,onSaved,onWorkspaceRefresh,compact
   const [invite,setInvite]=useState(null),[inviteResult,setInviteResult]=useState(null),[roleEditor,setRoleEditor]=useState(null);
   const [saving,setSaving]=useState(false),[form]=Form.useForm(),[inviteForm]=Form.useForm(),[addInviteForm]=Form.useForm(),[roleForm]=Form.useForm();
   const [people,setPeople]=useState([]),[invitations,setInvitations]=useState([]),[query,setQuery]=useState(''),[loadError,setLoadError]=useState(''),[directoryLoading,setDirectoryLoading]=useState(false);
-  const manager=canManage(state),projectId=state.project.id,alive=useRef(true),loadSerial=useRef(0);
+  const manager=canManage(state)&&state.permissions?.manageMembers!==false,projectId=state.project.id,alive=useRef(true),loadSerial=useRef(0);
   const members=state.members.map(member=>({...metadata?.members?.find(item=>item.id===member.id),...member}));
   const selectablePeople=people.filter(person=>!members.some(member=>member.personId===person.id));
   const nameCounts=new Map();
@@ -83,7 +83,7 @@ export function MemberManager({state,metadata,onSaved,onWorkspaceRefresh,compact
     if(!manager)return;
     const serial=++loadSerial.current;setDirectoryLoading(true);
     try {
-      const [directory,list]=await Promise.all([api('/api/people?selectableForProject='+encodeURIComponent(projectId)),isDemo?Promise.resolve({invitations:[]}):api('/api/invitations?projectId='+encodeURIComponent(projectId))]);
+      const [directory,list]=await Promise.all([manager?api('/api/people?selectableForProject='+encodeURIComponent(projectId)):Promise.resolve({people:[]}),isDemo||!manager?Promise.resolve({invitations:[]}):api('/api/invitations?projectId='+encodeURIComponent(projectId))]);
       if(!alive.current||serial!==loadSerial.current)return;
       setPeople(directory.people||[]);setInvitations(list.invitations||[]);setLoadError('');
     } catch(error) {if(alive.current&&serial===loadSerial.current)setLoadError(error.message);}
@@ -145,7 +145,7 @@ export function MemberManager({state,metadata,onSaved,onWorkspaceRefresh,compact
   </Form>;
   const invitingDisabled=isDemo&&addingMode==='invite';
   return <>
-    <div className="members-page-heading"><div><h2>{compact?'项目成员':'项目分工与成员'}</h2><p>人员档案用于分工，平台账号通过邀请获得项目访问。</p></div>{manager&&<Space wrap>
+    <div className="members-page-heading"><div><h2>{compact?'项目成员':'项目分工与成员'}</h2><p>{state.sample?.version===1?'示例使用固定虚拟伙伴，不邀请或添加真实账号；真实协作请新建自己的空白项目。':'人员档案用于分工，平台账号通过邀请获得项目访问。'}</p></div>{manager&&<Space wrap>
       <Button icon={<LinkOutlined/>} onClick={()=>openAdding('invite')}>邀请账号加入</Button>
       <Button type="primary" icon={<UserAddOutlined/>} onClick={()=>openAdding('existing')}>添加人员</Button>
     </Space>}</div>

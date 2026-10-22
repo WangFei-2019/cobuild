@@ -3,6 +3,7 @@ import {Alert,Button,Modal,Select,Space,Steps,Tag} from 'antd';
 import {ArrowRightOutlined,CheckCircleOutlined,FileDoneOutlined,FlagOutlined,LinkOutlined,PlusOutlined,ProjectOutlined,ReadOutlined,RobotOutlined,TeamOutlined} from '@ant-design/icons';
 import {api,isDemo,safeColor} from './lib.js';
 import {guideProjectModel} from './onboarding-model.js';
+import {SampleCreateButton} from './sample-project.jsx';
 import './onboarding.css';
 
 const STEPS=[{title:'找到项目'},{title:'约定分工'},{title:'完成交接'}];
@@ -26,9 +27,14 @@ export default function OnboardingGuide({user,workspace,preferredProjectId,onboa
     onStatusSaved(result.onboarding);
    }
    if(!alive.current)return;
+   if(action?.kind==='sample'){
+    const created=await onAction(action);
+    if(!alive.current)return;
+    if(created===false){setFailure({kind:'action',message:'未能准备示例项目。可以继续阅读或重试，不会重置指引状态。',status:nextStatus,action});return;}
+   }
    onClose();
-   if(action)onAction(action);
-  }catch(error){if(alive.current)setFailure({message:error.message||'暂时无法保存阅读状态，请重试。',status:nextStatus,action});}
+   if(action&&action.kind!=='sample')onAction(action);
+  }catch(error){if(alive.current)setFailure({kind:'save',message:error.message||'暂时无法保存阅读状态，请重试。',status:nextStatus,action});}
   finally{pending.current=false;if(alive.current)setSaving(false);}
  }
  const act=(tab,label)=>finish('dismissed',{kind:'project',projectId:project.id,tab,label:`${project.name} · ${label}`});
@@ -42,6 +48,7 @@ export default function OnboardingGuide({user,workspace,preferredProjectId,onboa
    {step===0&&<>
     <div className="guide-page-heading"><ProjectOutlined/><div><h2>先找到一个共同目标</h2><p>一个项目承载目标、伙伴、任务和成果。你可以自己发起，也可以接受伙伴的邀请。</p></div></div>
     <section className="guide-instruction"><h3><PlusOutlined/> 创建自己的项目</h3><p>写下要解决的问题、共同目标和期限；创建后再邀请伙伴、安排第一项分工。</p>{canCreate?<Button icon={<PlusOutlined/>} disabled={saving} onClick={create}>创建项目</Button>:<p className="guide-permission-note">当前账号的项目创建权限由工作区管理员维护。</p>}</section>
+    {canCreate&&<section className="guide-sample-entry"><SampleCreateButton workspace={workspace} disabled={saving} onClick={()=>finish('dismissed',{kind:'sample',label:'准备示例项目'})}/><p>加入你的工作区，含虚拟伙伴，不邀请真实伙伴；可删除并恢复。已有示例会打开，已删除的示例会保留修改恢复。</p></section>}
     <section className="guide-instruction"><h3><LinkOutlined/> 加入伙伴的项目</h3><p>{isDemo?'本地演示不生成真实邀请。可以在项目成员页添加本地档案，体验分工与成果交接。':'请让项目管理员分享本服务的真实邀请链接。普通注册或登录不会自动加入他人项目；通过邀请页注册会同时接受该邀请，已有账号需在邀请页确认接受。'}</p></section>
     {picker&&<div className="guide-existing-project">{picker}<Button disabled={saving} onClick={()=>act('overview','项目总览')}>打开这个项目<ArrowRightOutlined/></Button></div>}
    </>}
@@ -61,7 +68,7 @@ export default function OnboardingGuide({user,workspace,preferredProjectId,onboa
     {!project&&<p className="guide-permission-note">加入或创建项目后，就可以在任务页和交付成果页查看实际交接记录。</p>}
    </>}
   </div>
-  {failure&&<Alert className="guide-save-error" type="warning" showIcon title="指引状态尚未保存" description={<><p>{failure.message}</p>{failure.action&&<p>重试保存成功后将继续：{failure.action.label}。直接关闭不会执行这项操作。</p>}<Space wrap><Button size="small" loading={saving} onClick={()=>finish(failure.status,failure.action)}>重试保存</Button><Button size="small" disabled={saving} onClick={onClose}>先关闭，下次提醒</Button></Space><small>{isDemo?'本机状态未保存，下次打开演示仍可能提醒。':'仅关闭本次指引；状态未保存，下次登录仍可能提醒。'}</small></>}/>}
+  {failure&&<Alert className="guide-save-error" type="warning" showIcon title={failure.kind==='action'?'示例项目暂未准备好':'指引状态尚未保存'} description={<><p>{failure.message}</p>{failure.action&&failure.kind!=='action'&&<p>重试保存成功后将继续：{failure.action.label}。直接关闭不会执行这项操作。</p>}<Space wrap><Button size="small" loading={saving} onClick={()=>finish(failure.status,failure.action)}>{failure.kind==='action'?'重试准备示例':'重试保存'}</Button><Button size="small" disabled={saving} onClick={onClose}>{failure.kind==='action'?'先关闭':'先关闭，下次提醒'}</Button></Space>{failure.kind!=='action'&&<small>{isDemo?'本机状态未保存，下次打开演示仍可能提醒。':'仅关闭本次指引；状态未保存，下次登录仍可能提醒。'}</small>}</>}/>}
   <footer className="guide-footer"><Button type="text" disabled={saving} onClick={()=>finish('dismissed')}>暂时跳过</Button><Space>{step>0&&<Button disabled={saving} onClick={()=>setStep(value=>value-1)}>上一步</Button>}{step<2?<Button type="primary" disabled={saving} onClick={()=>setStep(value=>value+1)}>下一步<ArrowRightOutlined/></Button>:<Button type="primary" loading={saving} onClick={()=>finish('completed')}>了解了</Button>}</Space></footer>
   <p className="guide-reopen-note">{isDemo?'指引状态仅保存在当前浏览器。':'阅读状态保存在当前账号。'}以后可从右上角菜单重新打开「使用指引」。</p>
  </Modal>;

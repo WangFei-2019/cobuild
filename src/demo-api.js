@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { AppError, applyAction, analyzeUpdate, projectReport } from '../domain.mjs';
 import { applyPlanDraft, validatePlanDraft, applyMilestoneAction, reconcileMilestones, previewReplan, applyReplanDraft } from '../planning.mjs';
 import { dashboardSummary } from '../dashboard.mjs';
+import { buildSampleState, markSampleState, isSampleState, sampleOwner, sampleInfo, sampleProjectInput } from '../sample.mjs';
 import { peopleSummary, personDetails, profileFields, checkProfileDuplicates, projectWithProfiles } from '../people.mjs';
 
 export const DEMO_STORAGE_KEY = 'cobuild.pages.demo.v1';
@@ -26,10 +27,11 @@ function date(value, label = '截止日期') {
 }
 function dataShape(value) {
   return record(value) && value.schemaVersion === 1 && Number.isSafeInteger(value.revision) && value.revision > 0
-    && Array.isArray(value.projects) && value.projects.length > 0 && Array.isArray(value.people) && record(value.bindings) && record(value.files)
+    && Array.isArray(value.projects) && Array.isArray(value.people) && record(value.bindings) && record(value.files)
     && value.projects.every(state => state?.schemaVersion === 1 && state.project?.id && Number.isSafeInteger(state.revision)
       && ['members', 'tasks', 'activities', 'decisions'].every(key => Array.isArray(state[key])))
-    && value.projects.some(state => state.project.id === value.defaultProjectId)
+    && (value.projects.length ? value.projects.some(state => state.project.id === value.defaultProjectId) : value.defaultProjectId === null)
+    && (!Object.hasOwn(value,'archivedSamples') || Array.isArray(value.archivedSamples) && value.archivedSamples.every(entry => record(entry) && isSampleState(entry.state) && typeof entry.archivedAt === 'string'))
     && value.people.some(person => person.id === value.currentPersonId)
     && (!Object.hasOwn(value,'onboarding') || validOnboarding(value.onboarding));
 }
@@ -80,7 +82,11 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
       const binding = doc.bindings[projectId]?.[memberId];
       return binding ? { ...clone(binding), projectId, memberId, accountLinked: Boolean(person(binding.personId).accountLinked) } : null;
     };
-    return { person, people: () => clone(doc.people), member, membership(projectId, personId) {
+    return { person, people: () => {
+      const archivedVirtual = new Set((doc.archivedSamples || []).flatMap(entry => entry.state.members.filter(item => item.virtual).map(item => doc.bindings[entry.state.project.id]?.[item.id]?.personId)));
+      const activePeople = new Set(doc.projects.flatMap(state => Object.values(doc.bindings[state.project.id] || {}).map(item => item.personId)));
+      return clone(doc.people.filter(item => !archivedVirtual.has(item.id) || activePeople.has(item.id) || item.id === doc.currentPersonId));
+    }, member, membership(projectId, personId) {
       const item = Object.entries(doc.bindings[projectId] || {}).find(([, value]) => value.personId === personId);
       return item ? member(projectId, item[0]) : null;
     } };
@@ -92,6 +98,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
   const session = doc => ({ setupRequired: false, setupTokenRequired: false, demo: true, user: user(doc), onboarding:onboardingState(doc) });
   function stateFor(doc, projectId) {
     const id = projectId === undefined ? doc.defaultProjectId : projectId;
+    if (id === null && projectId === undefined) throw new AppError('当前演示没有可见项目',404);
     if (typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(id)) throw new AppError('项目标识不正确');
     const state = doc.projects.find(value => value.project.id === id);
     if (!state) throw new AppError('没有找到这个演示项目', 404);
@@ -102,7 +109,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     const adapter = identity(doc);
     const named = projectWithProfiles(state,adapter);
     return { ...clone(named), demo: true, members: named.members.map(member => ({ ...clone(member), ...adapter.member(state.project.id, member.id) })),
-      currentMemberId: adapter.membership(state.project.id, doc.currentPersonId)?.memberId || null, permissions: { ...permissions } };
+      currentMemberId: adapter.membership(state.project.id, doc.currentPersonId)?.memberId || null, sample:sampleInfo(state,user(doc).id), permissions: { ...permissions, ...(isSampleState(state)?{manageMembers:false}:{}) } };
   }
   function authorized(doc, state) {
     const value = decorate(doc, state);
@@ -111,13 +118,13 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
   }
   function workspace(doc) {
     return { revision: doc.revision, defaultProjectId: doc.defaultProjectId, currentPersonId: doc.currentPersonId, demo: true,
-      permissions: { createProject: true, manageWorkspace: true }, projects: doc.projects.map(state => {
+      permissions: { createProject: true, manageWorkspace: true }, archivedSamples:(doc.archivedSamples || []).filter(entry=>sampleOwner(entry.state)===user(doc).id).map(archivedSampleView), projects: doc.projects.map(state => {
         const value = decorate(doc, state), p = state.project;
         return { ...clone(p), description: p.description || '', goal: p.goal || '', deadline: p.deadline || '', color: p.color || '#427b68',
           ownerName: value.members.find(member => member.id === 'm0')?.name || '', memberCount: state.members.length,
           taskCount: state.tasks.length, doneCount: state.tasks.filter(task => task.status === 'done').length,
           blockedCount: state.tasks.filter(task => task.status === 'blocked').length, reviewCount: state.tasks.filter(task => task.status === 'review').length,
-          permissions: { ...permissions }, members: value.members };
+          sample:value.sample, permissions:value.permissions, members: value.members };
       }) };
   }
   function cleanState(next) {
@@ -127,9 +134,11 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     });
     return clean;
   }
+  const exportState = (doc,state) => ({...clone(projectWithProfiles(state,identity(doc))),sample:sampleInfo(state,user(doc).id)});
   function saveState(doc, next) {
     const clean = cleanState(next);
     const previous = doc.projects.find(state=>state.project.id===clean.project.id);
+    if (isSampleState(previous)) clean.sample=clone(previous.sample); else delete clean.sample;
     for (const member of clean.members) {
       const stored = previous.members.find(item=>item.id===member.id);
       if (stored) for (const field of ['name','color','initial']) { if (Object.hasOwn(stored,field)) member[field]=stored[field]; else delete member[field]; }
@@ -147,11 +156,16 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     const person = { id: `person-${randomUUID()}`, name: text(name, '成员姓名', 40, true), color, initial: [...name].at(-1), bio: '本浏览器的演示成员', accountLinked: false };
     doc.people.push(person); return person;
   }
-  function createProject(doc, input) {
+  function virtualSamplePerson(doc,personId) {
+    return [...doc.projects,...(doc.archivedSamples || []).map(entry=>entry.state)].some(state=>isSampleState(state)
+      && state.members.some(member=>member.virtual===true && doc.bindings[state.project.id]?.[member.id]?.personId===personId));
+  }
+  function createProject(doc, input, {persistChanges=true} = {}) {
     if (Object.keys(input).some(field => !['name', 'description', 'goal', 'deadline', 'ownerName', 'ownerRole', 'ownerPersonId', 'color', 'members'].includes(field))) throw new AppError('包含不支持的项目字段');
     if (input.members !== undefined && !Array.isArray(input.members)) throw new AppError('初始成员格式不正确');
     if ((input.members || []).length > 31) throw new AppError('每个演示项目最多支持32名成员');
     const adapter = identity(doc), owner = adapter.person(input.ownerPersonId || doc.currentPersonId), color = input.color || '#427b68';
+    if(virtualSamplePerson(doc,owner.id))throw new AppError('示例虚拟伙伴不能成为真实项目发起人',403);
     if (typeof color !== 'string' || !/^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/i.test(color)) throw new AppError('项目颜色需要合法的十六进制颜色');
     const createdAt = now().toISOString(), projectId = `project-${randomUUID()}`;
     const members = [{ id: 'm0', name: owner.name, role: text(input.ownerRole, '发起人职责', 80) || '项目发起人', color, initial: owner.initial }];
@@ -159,6 +173,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     for (const [index, value] of (input.members || []).entries()) {
       if (!record(value) || Object.keys(value).some(field => !['name', 'personId', 'role'].includes(field))) throw new AppError('初始成员格式不正确');
       const person = value.personId ? adapter.person(value.personId) : addPerson(doc, value.name);
+      if(virtualSamplePerson(doc,person.id))throw new AppError('示例虚拟伙伴不能加入真实项目',403);
       if (seen.has(person.id)) throw new AppError('同一人员不能重复加入项目'); seen.add(person.id);
       const id = `m${index + 1}`;
       members.push({ id, name: person.name, role: text(value.role, '成员职责', 80) || '项目协作者', color: person.color, initial: person.initial });
@@ -174,24 +189,78 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     const state = { schemaVersion: 1, revision: 1, project: { id: projectId, name: text(input.name, '项目名称', 100, true),
       description: text(input.description, '项目简介', 500), goal: text(input.goal, '项目目标', 1500), deadline: date(input.deadline), color, stage: '项目启动', createdAt },
       members, tasks: [], decisions: [], milestones: [], activities: [{ id: `event-${randomUUID()}`, actorId, taskId: '', kind: 'create', text: '在本浏览器创建演示项目。', createdAt }] };
-    doc.bindings[projectId] = bindings; doc.projects.push(state); doc.revision += 1; persist(doc);
+    doc.bindings[projectId] = bindings; doc.projects.push(state); doc.defaultProjectId ||= projectId; doc.revision += 1; if(persistChanges)persist(doc);
     return { state: decorate(doc, state), workspace: workspace(doc) };
   }
+  function archivedSampleView(entry) {
+    const {state,archivedAt}=entry;
+    return {id:state.project.id,name:state.project.name,color:state.project.color,revision:state.revision,archivedAt,sample:{version:1,canRestore:true}};
+  }
+  function sampleInput(input,keys) {
+    if(Object.keys(input).length!==keys.length || Object.keys(input).some(key=>!keys.includes(key))) throw new AppError('示例请求包含不支持的字段');
+    if(keys.includes('projectId') && (typeof input.projectId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(input.projectId))) throw new AppError('项目标识不正确');
+  }
+  function assertOwnSample(doc,state) {
+    if(!isSampleState(state)) throw new AppError('只能移除或恢复由应用创建的示例项目',403);
+    if(sampleOwner(state)!==user(doc).id) throw new AppError('只能管理当前体验账号创建的示例项目',403);
+  }
+  function restoreSample(doc,projectId) {
+    const active=doc.projects.find(state=>state.project.id===projectId);
+    if(active){assertOwnSample(doc,active);return {state:decorate(doc,active),workspace:workspace(doc),reused:true,restored:false};}
+    const entry=(doc.archivedSamples || []).find(item=>item.state.project.id===projectId);
+    if(!entry)throw new AppError('没有找到这个已移除示例',404);
+    assertOwnSample(doc,entry.state);
+    doc.archivedSamples=doc.archivedSamples.filter(item=>item!==entry);
+    doc.projects.push(entry.state);doc.defaultProjectId ||= projectId;doc.revision+=1;persist(doc);
+    return {state:decorate(doc,entry.state),workspace:workspace(doc),reused:false,restored:true};
+  }
+  function createSample(doc,input) {
+    sampleInput(input,[]);
+    const active=doc.projects.find(state=>sampleOwner(state)===user(doc).id);
+    if(active)return {state:decorate(doc,active),workspace:workspace(doc),reused:true,restored:false};
+    const archived=(doc.archivedSamples || []).find(entry=>sampleOwner(entry.state)===user(doc).id);
+    if(archived)return restoreSample(doc,archived.state.project.id);
+    createProject(doc,sampleProjectInput(user(doc).name),{persistChanges:false});
+    const index=doc.projects.length-1,base=doc.projects[index];
+    base.activities=[];
+    const todayParts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(now()).map(part=>[part.type,part.value]));
+    const today=todayParts.year+'-'+todayParts.month+'-'+todayParts.day;
+    const state=markSampleState(buildSampleState(base,{today}),user(doc).id);
+    doc.projects[index]=state;
+    const virtualId=doc.bindings[state.project.id].m1.personId;
+    doc.people.find(person=>person.id===virtualId).bio='内置示例虚拟伙伴，没有真实账号。';
+    persist(doc);
+    return {state:decorate(doc,state),workspace:workspace(doc),reused:false,restored:false};
+  }
+  function archiveSample(doc,input) {
+    sampleInput(input,['projectId','expectedRevision']);
+    const active=doc.projects.find(state=>state.project.id===input.projectId),existing=(doc.archivedSamples || []).find(entry=>entry.state.project.id===input.projectId),state=active || existing?.state;
+    if(!state)throw new AppError('没有找到这个示例项目',404);
+    assertOwnSample(doc,state);
+    if(!Number.isSafeInteger(input.expectedRevision)||input.expectedRevision!==state.revision)throw new AppError('示例已有更新，请刷新后再移除',409);
+    if(existing)return {workspace:workspace(doc),archivedSample:archivedSampleView(existing),alreadyArchived:true};
+    const entry={state:clone(state),archivedAt:now().toISOString()};
+    doc.projects=doc.projects.filter(item=>item!==active);doc.archivedSamples=[...(doc.archivedSamples || []),entry];
+    if(doc.defaultProjectId===input.projectId)doc.defaultProjectId=doc.projects[0]?.project.id || null;
+    doc.revision+=1;persist(doc);
+    return {workspace:workspace(doc),archivedSample:archivedSampleView(entry),alreadyArchived:false};
+  }
   const peoplePermissions = {managePeople:true,createPerson:true,editProfile:true};
-  const profileView = person => ({...clone(person),permissions:{editProfile:true}});
+  const profileView = (doc,person) => ({...clone(person),permissions:{editProfile:!virtualSamplePerson(doc,person.id)}});
   const visibleStates = doc => doc.projects.map(state=>projectWithProfiles(state,identity(doc)));
   function writePerson(doc,input,personId) {
     const create = personId === undefined, allowed = create ? ['name','bio','color','allowDuplicateName'] : ['expectedRevision','patch','allowDuplicateName'];
     if (Object.keys(input).some(key=>!allowed.includes(key))) throw new AppError('包含不支持的人员档案字段');
     if (input.allowDuplicateName !== undefined && typeof input.allowDuplicateName !== 'boolean') throw new AppError('同名档案确认参数不正确');
     if (!create && (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision!==doc.revision)) throw new AppError('人员目录已有更新，请刷新档案后重新保存',409);
+    if(!create&&virtualSamplePerson(doc,personId))throw new AppError('示例虚拟伙伴使用固定档案，不能修改为真实人员',403);
     const {allowDuplicateName=false,...fields}=input, previous = create ? null : identity(doc).person(personId);
     const patch = profileFields(create ? fields : input.patch,{partial:!create});
     checkProfileDuplicates(doc.people,create || patch.name!==previous.name ? patch.name : undefined,{excludingId:personId,allowDuplicateName});
     const person = create ? {id:`person-${randomUUID()}`,...patch,accountLinked:false} : {...previous,...patch};
     if (create) doc.people.push(person); else doc.people[doc.people.findIndex(value=>value.id===personId)]=person;
     doc.revision+=1;persist(doc);
-    return {person:profileView(person),revision:doc.revision,permissions:{...peoplePermissions},session:session(doc)};
+    return {person:profileView(doc,person),revision:doc.revision,permissions:{...peoplePermissions},session:session(doc)};
   }
   function samplePlan(doc, state, input, replan) {
     const goal = text(input.goal, '规划目标', 6000, true), ownMember = actor(doc, state, input).actorId;
@@ -248,13 +317,14 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
       if (path === '/api/people') {
         const selected=url.searchParams.getAll('selectableForProject');if(selected.length>1)throw new AppError('请只指定一个项目');
         if(selected.length)stateFor(doc,selected[0]);
-        return {demo:true,revision:doc.revision,permissions:{...peoplePermissions},people:(selected.length?adapter.people():peopleSummary(adapter,visibleStates(doc),current)).map(profileView)};
+        return {demo:true,revision:doc.revision,permissions:{...peoplePermissions},people:(selected.length?adapter.people().filter(person=>!virtualSamplePerson(doc,person.id)):peopleSummary(adapter,visibleStates(doc),current)).map(person=>profileView(doc,person))};
       }
-      if (/^\/api\/people\/[A-Za-z0-9_-]+$/.test(path)) {const detail=personDetails(adapter,visibleStates(doc),current,path.split('/').at(-1));return {demo:true,...detail,person:profileView(detail.person),revision:doc.revision,permissions:{...peoplePermissions}};}
+      if (/^\/api\/people\/[A-Za-z0-9_-]+$/.test(path)) {const id=path.split('/').at(-1);if(!adapter.people().some(person=>person.id===id))throw new AppError('没有找到这个成员档案',404);const detail=personDetails(adapter,visibleStates(doc),current,id);return {demo:true,...detail,person:profileView(doc,detail.person),revision:doc.revision,permissions:{...peoplePermissions,editProfile:!virtualSamplePerson(doc,id)}};}
       if (path === '/api/ai/status') return { configured: false, demo: true, samplePlanning: true, provider: 'local-sample', model: DEMO_MODEL, baseUrl: '', fileLimit: FILE_LIMIT, filesLimit: FILES_LIMIT };
+      if (path === '/api/ai/capabilities') { stateFor(doc,projectId); return { configured:false,samplePlanning:true,canGenerate:true }; }
       if (path === '/api/state') return decorate(doc, stateFor(doc, projectId));
-      if (path === '/api/export') return clone(stateFor(doc, projectId));
-      if (path === '/api/report') return projectReport(stateFor(doc, projectId));
+      if (path === '/api/export') return exportState(doc,stateFor(doc, projectId));
+      if (path === '/api/report') return projectReport(projectWithProfiles(stateFor(doc, projectId),adapter));
       throw new AppError('演示接口不存在', 404);
     }
     if (path === '/api/auth/logout') return session(doc);
@@ -269,8 +339,12 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     }
     if (path === '/api/people') return writePerson(doc,input);
     if (/^\/api\/people\/[A-Za-z0-9_-]+$/.test(path)) return writePerson(doc,input,path.split('/').at(-1));
+    if (path === '/api/samples') return createSample(doc,input);
+    if (path === '/api/samples/archive') return archiveSample(doc,input);
+    if (path === '/api/samples/restore') {sampleInput(input,['projectId']);return restoreSample(doc,input.projectId);}
     if (path === '/api/projects') return createProject(doc, input);
     const state = stateFor(doc, projectId), action = actor(doc, state, input);
+    if(isSampleState(state) && (path==='/api/project-members'||path==='/api/action'&&['addMember','updateMember'].includes(action.type)))throw new AppError('示例使用固定虚拟伙伴，真实协作请创建自己的项目',403);
     if (path === '/api/ai/plan' || path === '/api/ai/replan') return samplePlan(doc, state, input, path.endsWith('/replan'));
     if (path === '/api/analyze') return { analysis: analyzeUpdate(state, action), demo: true };
     if (path === '/api/plans/preview') return previewReplan(authorized(doc, state), action);
@@ -280,6 +354,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     else if (path === '/api/milestones/action') next = applyMilestoneAction(authorized(doc, state), action);
     else if (path === '/api/project-members') {
       const person = adapter.person(input.personId);
+      if(virtualSamplePerson(doc,person.id))throw new AppError('示例虚拟伙伴不能加入真实项目',403);
       if (adapter.membership(state.project.id, person.id)) throw new AppError('该演示人员已经在项目中', 409);
       const role = input.accessRole || 'member'; if (!['admin', 'member', 'viewer'].includes(role)) throw new AppError('项目访问角色不正确');
       next = applyAction(state, { ...action, type: 'addMember', name: person.name, role: input.role }, { manageProject: true, allowDuplicateNames: true });
@@ -297,8 +372,8 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     const url = new URL(inputURL, 'https://cobuild-demo.invalid');
     if (url.origin !== 'https://cobuild-demo.invalid') throw new AppError('此下载不是本地演示文件');
     const doc = load(), projectId = url.searchParams.has('projectId') ? url.searchParams.get('projectId') : undefined;
-    if (url.pathname === '/api/export') return { filename: '共建-演示项目.json', blob: new Blob([JSON.stringify(stateFor(doc, projectId), null, 2)], { type: 'application/json;charset=utf-8' }) };
-    if (url.pathname === '/api/report') return { filename: '共建-演示进展.md', blob: new Blob([projectReport(stateFor(doc, projectId))], { type: 'text/markdown;charset=utf-8' }) };
+    if (url.pathname === '/api/export') return { filename: '共建-演示项目.json', blob: new Blob([JSON.stringify(exportState(doc,stateFor(doc, projectId)), null, 2)], { type: 'application/json;charset=utf-8' }) };
+    if (url.pathname === '/api/report') return { filename: '共建-演示进展.md', blob: new Blob([projectReport(projectWithProfiles(stateFor(doc, projectId),identity(doc)))], { type: 'text/markdown;charset=utf-8' }) };
     if (doc.samples?.[url.pathname]) { const sample = doc.samples[url.pathname]; return { filename: sample.name, blob: new Blob([sample.text], { type: 'text/markdown;charset=utf-8' }) }; }
     if (/^\/api\/files\/[a-f0-9-]+$/.test(url.pathname)) {
       const file = doc.files[url.pathname.split('/').at(-1)];

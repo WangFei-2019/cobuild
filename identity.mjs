@@ -33,7 +33,7 @@ function accessRole(value = 'member') {
   return value;
 }
 
-export function createIdentity(dataDir) {
+export function createIdentity(dataDir, { projectAvailable = () => true, personVisible = () => true } = {}) {
   const path = join(dataDir, 'identity.sqlite');
   const db = new DatabaseSync(path);
   chmodSync(path, 0o600);
@@ -44,6 +44,7 @@ export function createIdentity(dataDir) {
     CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY,email TEXT NOT NULL UNIQUE,personId TEXT NOT NULL UNIQUE REFERENCES people(id),passwordSalt TEXT NOT NULL,passwordHash TEXT NOT NULL,workspaceRole TEXT NOT NULL,createdAt TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sessions(tokenHash TEXT PRIMARY KEY,accountId TEXT NOT NULL REFERENCES accounts(id),createdAt TEXT NOT NULL,expiresAt TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS account_onboarding(accountId TEXT NOT NULL REFERENCES accounts(id),version INTEGER NOT NULL,status TEXT NOT NULL CHECK(status IN ('dismissed','completed')),updatedAt TEXT NOT NULL,PRIMARY KEY(accountId,version));
+    CREATE TABLE IF NOT EXISTS project_operations(id TEXT PRIMARY KEY,committedAt TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS project_members(projectId TEXT NOT NULL,memberId TEXT NOT NULL,personId TEXT NOT NULL REFERENCES people(id),accessRole TEXT NOT NULL,PRIMARY KEY(projectId,memberId),UNIQUE(projectId,personId));
     CREATE TABLE IF NOT EXISTS invitations(id TEXT PRIMARY KEY,tokenHash TEXT NOT NULL UNIQUE,projectId TEXT NOT NULL,memberId TEXT,personId TEXT REFERENCES people(id),email TEXT NOT NULL DEFAULT '',accessRole TEXT NOT NULL,createdBy TEXT NOT NULL REFERENCES accounts(id),createdAt TEXT NOT NULL,expiresAt TEXT NOT NULL,status TEXT NOT NULL,acceptedBy TEXT REFERENCES accounts(id),acceptedAt TEXT);
     CREATE TABLE IF NOT EXISTS login_attempts(key TEXT PRIMARY KEY,count INTEGER NOT NULL,windowStart INTEGER NOT NULL);`);
@@ -52,9 +53,32 @@ export function createIdentity(dataDir) {
   const all = (sql, ...args) => db.prepare(sql).all(...args);
   const bump = () => run("UPDATE metadata SET value=value+1 WHERE key='revision'");
   const transaction = fn => {
+    const effects = [];
     db.exec('BEGIN IMMEDIATE');
-    try { const result = fn(); db.exec('COMMIT'); return result; }
-    catch (error) { db.exec('ROLLBACK'); throw error; }
+    let result;
+    try {
+      result = fn(effects);
+      if (effects.length) {
+        // This marker commits atomically with the identity changes. Startup
+        // uses it before reading project JSON or synthesizing any mappings.
+        for (const effect of effects) {
+          const operationId=id('operation');
+          run('INSERT INTO project_operations VALUES(?,?)',operationId,now());
+          effect.commit(operationId);
+        }
+      }
+      db.exec('COMMIT');
+    } catch (error) {
+      const failures = [error];
+      try { db.exec('ROLLBACK'); } catch (rollbackError) { failures.push(rollbackError); }
+      for (const effect of effects.reverse()) try { effect.rollback(); } catch (rollbackError) { failures.push(rollbackError); }
+      if (failures.length > 1) throw new AggregateError(failures,'身份事务失败且恢复未完成，请停止写入并检查数据目录');
+      throw error;
+    }
+    // SQL is committed. A cleanup failure must never roll back its JSON.
+    // The retained journal is safe: recovery will observe the committed opId.
+    for (const effect of effects) try { effect.finalize?.(); } catch(error) { process.stderr.write(`身份联动写入已提交，恢复日志待启动清理：${error.message}\n`); }
+    return result;
   };
   const accountCount = () => get('SELECT COUNT(*) AS count FROM accounts').count;
   let registrationsInFlight = 0;
@@ -97,6 +121,7 @@ export function createIdentity(dataDir) {
     if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new AppError('邀请不存在或已失效', 404);
     const invitation = get('SELECT * FROM invitations WHERE tokenHash=?', hash(token));
     if (!invitation) throw new AppError('邀请不存在或已失效', 404);
+    if (!projectAvailable(invitation.projectId)) throw new AppError('邀请所属项目已不可用', 404);
     if (invitation.status !== 'pending') throw new AppError('邀请已经使用或撤销', 410);
     if (invitation.expiresAt <= now()) throw new AppError('邀请已过期', 410);
     return invitation;
@@ -115,7 +140,7 @@ export function createIdentity(dataDir) {
       throw new AppError('这份人员档案关联其他项目，请由有权管理所有关联项目的管理者或工作区管理员核对认领', 403);
     }
   }
-  function claim(invitation, current, joinProject) {
+  function claim(invitation, current, joinProject, effects) {
     if (invitation.email && invitation.email !== current.email) throw new AppError('请使用邀请指定的邮箱接受', 403);
     let personId = current.personId;
     if (invitation.personId && invitation.personId !== personId) {
@@ -134,7 +159,9 @@ export function createIdentity(dataDir) {
     }
     let membership = get('SELECT * FROM project_members WHERE projectId=? AND personId=?', invitation.projectId, personId);
     if (!membership) {
-      const memberId = joinProject(invitation.projectId, person(personId));
+      const joined = joinProject(invitation.projectId, person(personId));
+      const memberId = typeof joined === 'string' ? joined : joined.memberId;
+      if (typeof joined !== 'string') effects.push(joined.effect);
       run('INSERT INTO project_members VALUES(?,?,?,?)', invitation.projectId, memberId, personId, invitation.accessRole);
       membership = { memberId };
     } else {
@@ -174,8 +201,9 @@ export function createIdentity(dataDir) {
   }
   return {
     close() { db.close(); }, revision() { return get("SELECT value FROM metadata WHERE key='revision'").value; },
+    operationCommitted(operationId) { return Boolean(get('SELECT 1 FROM project_operations WHERE id=?',operationId)); },
     setupRequired() { return accountCount() === 0; }, person,
-    people() { return all('SELECT id FROM people').map(value => person(value.id)); },
+    people() { return all('SELECT id FROM people').filter(value => personVisible(value.id)).map(value => person(value.id)); },
     createPerson(input, { allowDuplicateName = false } = {}) {
       const fields = profileFields(input);
       return transaction(() => {
@@ -257,7 +285,7 @@ export function createIdentity(dataDir) {
       failed(keys); registrationsInFlight += 1;
       try {
         const fields = await passwordFields(input.password);
-        return transaction(() => {
+        return transaction(effects => {
           const invitation = invited ? invitationByToken(input.inviteToken) : null;
           if (invitation?.email && invitation.email !== address) throw new AppError('请使用邀请指定的邮箱注册', 403);
           if (get('SELECT id FROM accounts WHERE email=?', address)) throw accountFieldConflict('email', 'EMAIL_TAKEN', '该邮箱已注册');
@@ -270,14 +298,15 @@ export function createIdentity(dataDir) {
           assertNicknameAvailable(invitation?.personId ? person(invitation.personId).name : name);
           const personId = invitation?.personId || newPerson(name), accountId = id('account');
           run('INSERT INTO accounts VALUES(?,?,?,?,?,?,?)', accountId, address, personId, fields.salt, fields.key, 'member', now());
-          const accepted = invitation ? claim(invitation, user(accountId), joinProject) : null;
+          const accepted = invitation ? claim(invitation, user(accountId), joinProject, effects) : null;
           if (!accepted) bump();
           return { ...session(accountId), ...(accepted ? { projectId: accepted.projectId } : {}) };
         });
       } finally { registrationsInFlight -= 1; }
     },
-    syncProject(state, bindings = new Map()) {
-      transaction(() => {
+    syncProject(state, bindings = new Map(), effect) {
+      transaction(effects => {
+        if(effect)effects.push(effect);
         for (const member of state.members) {
           const existing = get('SELECT * FROM project_members WHERE projectId=? AND memberId=?', state.project.id, member.id);
           if (existing) continue;
@@ -293,6 +322,7 @@ export function createIdentity(dataDir) {
     member(projectId, memberId) { const value = get('SELECT * FROM project_members WHERE projectId=? AND memberId=?', projectId, memberId); return value ? { ...value, accountLinked: person(value.personId).accountLinked } : null; },
     memberships(personId) { return all('SELECT * FROM project_members WHERE personId=?', personId).map(value => ({ ...value })); },
     invite(input, current) {
+      if (!projectAvailable(input.projectId)) throw new AppError('邀请所属项目已不可用', 404);
       const role = accessRole(input.accessRole);
       const address = input.email == null || input.email === '' ? '' : email(input.email);
       let member = null;
@@ -328,6 +358,6 @@ export function createIdentity(dataDir) {
       run("UPDATE invitations SET status='revoked' WHERE id=?", idValue); bump();
       return publicInvitation({ ...value, status: 'revoked' });
     },
-    accept(token, current, joinProject) { return transaction(() => claim(invitationByToken(token), user(current.id), joinProject)); }
+    accept(token, current, joinProject) { return transaction(effects => claim(invitationByToken(token), user(current.id), joinProject, effects)); }
   };
 }

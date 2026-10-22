@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSyn
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { AppError, seedState } from './domain.mjs';
+import { isSampleState, sampleOwner } from './sample.mjs';
 
 const COLORS = ['#427b68', '#b47e59', '#7770a3', '#6387a2'];
 const validId = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/.test(value);
@@ -65,7 +66,7 @@ function creationState(input, { allowDuplicateNames = false } = {}) {
   if (!/^#(?:[a-f0-9]{3}|[a-f0-9]{4}|[a-f0-9]{6}|[a-f0-9]{8})$/i.test(color)) throw new AppError('项目颜色需要使用合法的十六进制颜色');
   if (input.members !== undefined && !Array.isArray(input.members)) throw new AppError('初始成员格式不正确');
   const initialMembers = input.members || [];
-  if (initialMembers.length > 31) throw new AppError('体验版最多支持 32 名成员');
+  if (initialMembers.length > 31) throw new AppError('每个项目最多支持 32 名成员');
   const members = [{ id: 'm0', name: ownerName, role: ownerRole, color, initial: [...ownerName].at(-1) }];
   const names = new Set([ownerName.normalize('NFKC').toLocaleLowerCase()]);
   for (const [index, candidate] of initialMembers.entries()) {
@@ -85,9 +86,54 @@ function creationState(input, { allowDuplicateNames = false } = {}) {
   };
 }
 
-export function createWorkspace(dataDir, { seedDemo = false } = {}) {
+function recoverOperations(dataDir, operationCommitted) {
+  const directory = join(dataDir,'.transactions');
+  if (!existsSync(directory)) return;
+  const entries = readdirSync(directory).filter(name=>name.endsWith('.json'));
+  if (entries.length && typeof operationCommitted !== 'function') throw new Error('存在未清理的身份联动写入日志，必须通过正式身份数据库恢复后再打开工作区');
+  const bytes = path => existsSync(path) ? readFileSync(path) : null;
+  const equal = (a,b) => a === null || b === null ? a === b : a.equals(b);
+  const decode = value => {
+    if (value === null) return null;
+    if (typeof value !== 'string') throw new Error('日志字节格式不正确');
+    const result=Buffer.from(value,'base64');
+    if (result.toString('base64') !== value) throw new Error('日志字节格式不正确');
+    return result;
+  };
+  for (const name of entries.sort()) {
+    const path=join(directory,name);
+    let entry;
+    try {
+      entry=JSON.parse(readFileSync(path,'utf8'));
+      if (entry.schemaVersion !== 1 || !validId(entry.projectId) || !validId(entry.operationId) || name !== `${entry.operationId}.json`) throw new Error('schema');
+      const projectPath=entry.original ? join(dataDir,'project.json') : join(dataDir,'projects',`${entry.projectId}.json`),indexPath=join(dataDir,'workspace.json');
+      const oldProject=decode(entry.previousProject),nextProject=decode(entry.nextProject),oldIndex=decode(entry.previousIndex),nextIndex=decode(entry.nextIndex);
+      if (!nextProject || !oldIndex || !nextIndex || typeof entry.original !== 'boolean') throw new Error('schema');
+      const committed=operationCommitted(entry.operationId);
+      const targets=[[projectPath,oldProject,nextProject,'project'],[indexPath,oldIndex,nextIndex,'index']];
+      // Validate every file before restoring any file. An uncommitted operation
+      // cannot overwrite unrelated or later legitimate contents.
+      for (const [target,oldValue,nextValue,kind] of targets) {
+        const current=bytes(target);
+        if (equal(current,oldValue) || equal(current,nextValue)) continue;
+        if (!committed || current===null) throw new Error('恢复快照与磁盘内容不一致');
+        const later=JSON.parse(current),expected=JSON.parse(nextValue);
+        if (!Number.isSafeInteger(later.revision) || later.revision < expected.revision || (kind==='project' && later.project?.id!==entry.projectId)) throw new Error('恢复快照与磁盘内容不一致');
+      }
+      for (const [target,oldValue,nextValue] of targets) {
+        const current=bytes(target);
+        if (committed) { if (equal(current,oldValue)) writeAtomic(target,nextValue); }
+        else if (!equal(current,oldValue)) { if (oldValue===null) unlinkSync(target); else writeAtomic(target,oldValue); }
+      }
+      unlinkSync(path);
+    } catch (error) { throw new Error(`身份联动写入日志恢复失败，已保留数据和日志 ${path}：${error.message}`); }
+  }
+}
+
+export function createWorkspace(dataDir, { seedDemo = false, operationCommitted } = {}) {
   if (typeof seedDemo !== 'boolean') throw new Error('seedDemo 需要为布尔值，仅供显式示例或测试初始化');
   mkdirSync(join(dataDir, 'projects'), { recursive: true });
+  recoverOperations(dataDir,operationCommitted);
   const originalPath = join(dataDir, 'project.json');
   const indexPath = join(dataDir, 'workspace.json');
   if (!existsSync(indexPath) && readdirSync(join(dataDir, 'projects')).some(name => name.endsWith('.json'))) {
@@ -103,6 +149,8 @@ export function createWorkspace(dataDir, { seedDemo = false } = {}) {
     index = readJSON(indexPath, value => record(value) && value.schemaVersion === 1 && Number.isSafeInteger(value.revision) && value.revision > 0
       && Array.isArray(value.projectIds) && value.projectIds.every(validId) && new Set(value.projectIds).size === value.projectIds.length
       && (value.projectIds.length === 0 ? value.defaultProjectId === null : validId(value.defaultProjectId) && value.projectIds.includes(value.defaultProjectId))
+      && (value.archivedProjects === undefined || Array.isArray(value.archivedProjects) && value.archivedProjects.every(item => record(item) && validId(item.id) && typeof item.archivedAt === 'string' && Number.isFinite(Date.parse(item.archivedAt)))
+        && new Set(value.archivedProjects.map(item => item.id)).size === value.archivedProjects.length && value.archivedProjects.every(item => !value.projectIds.includes(item.id)))
       && (!originalId || value.projectIds.includes(originalId)));
   } else {
     index = { schemaVersion: 1, revision: 1, defaultProjectId: originalId, projectIds: originalId ? [originalId] : [] };
@@ -110,7 +158,7 @@ export function createWorkspace(dataDir, { seedDemo = false } = {}) {
   }
   const states = new Map(original ? [[originalId, original]] : []);
   const pathFor = id => id === originalId ? originalPath : join(dataDir, 'projects', `${id}.json`);
-  for (const id of index.projectIds) {
+  for (const id of [...index.projectIds, ...(index.archivedProjects || []).map(item => item.id)]) {
     if (id === originalId) continue;
     states.set(id, readJSON(pathFor(id), value => validState(value) && value.project.id === id));
   }
@@ -119,11 +167,12 @@ export function createWorkspace(dataDir, { seedDemo = false } = {}) {
     const id = requestedId === undefined ? index.defaultProjectId : requestedId;
     if (requestedId === undefined && id === null) throw new AppError('工作区还没有项目，请先创建项目', 404);
     if (!validId(id)) throw new AppError('项目标识不正确');
-    if (!states.has(id)) throw new AppError('没有找到这个项目', 404);
+    if (!states.has(id) || !index.projectIds.includes(id)) throw new AppError('没有找到这个项目', 404);
     return id;
   }
 
   function view(projectIds = index.projectIds) {
+    projectIds = projectIds.filter(id => index.projectIds.includes(id));
     return {
       revision: index.revision, defaultProjectId: projectIds.includes(index.defaultProjectId) ? index.defaultProjectId : projectIds[0] || null,
       projects: projectIds.map(id => {
@@ -141,42 +190,101 @@ export function createWorkspace(dataDir, { seedDemo = false } = {}) {
     };
   }
 
-  function save(requestedId, next) {
-    const id = resolveId(requestedId);
+  let writeFailure = null;
+  const writable = () => { if (writeFailure) throw new Error('此前写入恢复未完成，请停止写入并检查数据目录',{cause:writeFailure}); };
+  function stageMutation(id,next,{creating=false}={}) {
+    writable();
     if (!validState(next) || next.project.id !== id) throw new Error('项目状态或标识不正确');
-    const nextIndex = { ...index, revision: index.revision + 1 };
-    const path = pathFor(id), previousBytes = readFileSync(path);
-    writeJSON(path, next);
-    try { writeJSON(indexPath, nextIndex); }
-    catch (error) {
-      // A failed second write must not leave disk ahead of memory or an upload
-      // pointing at a file that the HTTP error handler will remove.
-      try { writeAtomic(path, previousBytes); }
-      catch (rollbackError) {
-        throw new AggregateError([error, rollbackError], '项目索引写入和项目恢复均失败，请停止写入并检查数据目录');
-      }
-      throw error;
-    }
-    states.set(id, next); index = nextIndex;
+    if (!creating && JSON.stringify(next.sample) !== JSON.stringify(states.get(id).sample)) throw new AppError('不能修改项目的示例归属标记');
+    const previousIndex=index,previousState=states.get(id),nextIndex={...index,revision:index.revision+1,
+      ...(creating ? {defaultProjectId:index.defaultProjectId||id,projectIds:[...index.projectIds,id]} : {})};
+    const path=pathFor(id),previousBytes=creating?null:readFileSync(path),previousIndexBytes=readFileSync(indexPath);
+    let committed=false,journalPath=null;
+    const removeJournal=()=>{if(journalPath&&existsSync(journalPath))unlinkSync(journalPath);journalPath=null;};
+    const restoreFiles=()=>{if(previousBytes===null){if(existsSync(path))unlinkSync(path);}else writeAtomic(path,previousBytes);writeAtomic(indexPath,previousIndexBytes);};
+    return {
+      commit(operationId) {
+        writable();
+        if (committed) return;
+        if (index !== previousIndex || states.get(id) !== previousState) throw new AppError('项目已有更新，请核对最新内容后重新操作',409);
+        if (operationId) {
+          if (!validId(operationId)) throw new Error('身份联动写入标识不正确');
+          const directory=join(dataDir,'.transactions');mkdirSync(directory,{recursive:true,mode:0o700});journalPath=join(directory,`${operationId}.json`);
+          const encode=value=>value===null?null:Buffer.from(value).toString('base64');
+          writeJSON(journalPath,{schemaVersion:1,operationId,projectId:id,original:id===originalId,
+            previousProject:encode(previousBytes),nextProject:encode(`${JSON.stringify(next,null,2)}\n`),previousIndex:encode(previousIndexBytes),nextIndex:encode(`${JSON.stringify(nextIndex,null,2)}\n`)});
+        }
+        try { writeJSON(path,next);writeJSON(indexPath,nextIndex); }
+        catch (error) {
+          try { restoreFiles();removeJournal(); }
+          catch (rollbackError) { writeFailure=rollbackError;throw new AggregateError([error,rollbackError],'项目索引写入和项目恢复均失败，请停止写入并检查数据目录'); }
+          throw error;
+        }
+        states.set(id,next);index=nextIndex;committed=true;
+      },
+      rollback() {
+        if (!committed) return;
+        // Identity transactions and these effects are synchronous in one
+        // process. Refuse to compensate over any later legitimate mutation.
+        if (index !== nextIndex || states.get(id) !== next) { writeFailure=new Error('回滚快照已变化，请停止写入并检查数据目录');throw writeFailure; }
+        try { restoreFiles();removeJournal(); }
+        catch(error) { writeFailure=error;throw error; }
+        if(creating)states.delete(id);else states.set(id,previousState);index=previousIndex;committed=false;
+      },
+      finalize() { removeJournal(); }
+    };
+  }
+  function stageSave(requestedId,next) { return stageMutation(resolveId(requestedId),next); }
+  function save(requestedId,next,{persist}={}) {
+    const effect=stageSave(requestedId,next);
+    if(persist)persist(effect);else effect.commit();
     return next;
   }
 
   return {
     resolveId, view,
-    allStates() { return [...states.values()]; },
+    allStates() { return index.projectIds.map(id => states.get(id)); },
+    allStoredStates() { return [...states.values()]; },
+    isActive(id) { return index.projectIds.includes(id); },
+    storedState(id) { if (!validId(id)) throw new AppError('项目标识不正确'); const state = states.get(id); if (!state) throw new AppError('没有找到这个项目',404); return state; },
+    archivedEntries() { return (index.archivedProjects || []).map(item => ({ state:states.get(item.id), archivedAt:item.archivedAt })); },
     state(requestedId) { return states.get(resolveId(requestedId)); },
-    save,
+    save, stageSave,
     create(input, options = {}) {
+      writable();
       const state = creationState(input, options);
       if (options.decorate) options.decorate(state);
       const id = state.project.id;
-      const nextIndex = { ...index, revision: index.revision + 1, defaultProjectId: index.defaultProjectId || id, projectIds: [...index.projectIds, id] };
-      const path = pathFor(id);
-      writeJSON(path, state);
-      try { writeJSON(indexPath, nextIndex); }
-      catch (error) { unlinkSync(path); throw error; }
-      states.set(id, state); index = nextIndex;
+      const effect=stageMutation(id,state,{creating:true});
+      if(options.persist)options.persist(state,effect);else effect.commit();
       return { state, workspace: view() };
+    },
+    archiveSample(id, { ownerAccountId, expectedRevision } = {}) {
+      writable();
+      const current = states.get(id);
+      if (!current) throw new AppError('没有找到这个项目',404);
+      if (!isSampleState(current) || sampleOwner(current) !== ownerAccountId) throw new AppError('只能移除由当前账号创建的示例项目',403);
+      if (!Number.isSafeInteger(expectedRevision)) throw new AppError('请提供移除示例所依据的项目版本');
+      if (current.revision !== expectedRevision) throw new AppError('示例已有更新，请核对最新内容后再移除',409);
+      const existing = (index.archivedProjects || []).find(item => item.id === id);
+      if (existing) return {state:current,archivedAt:existing.archivedAt,alreadyArchived:true};
+      const archivedAt = new Date().toISOString(), projectIds = index.projectIds.filter(value => value !== id);
+      const nextIndex = {...index,revision:index.revision+1,projectIds,defaultProjectId:projectIds.includes(index.defaultProjectId)?index.defaultProjectId:projectIds[0]||null,
+        archivedProjects:[...(index.archivedProjects || []),{id,archivedAt}]};
+      writeJSON(indexPath,nextIndex); index = nextIndex;
+      return {state:current,archivedAt,alreadyArchived:false};
+    },
+    restoreSample(id, { ownerAccountId } = {}) {
+      writable();
+      const current = states.get(id);
+      if (!current) throw new AppError('没有找到这个项目',404);
+      if (!isSampleState(current) || sampleOwner(current) !== ownerAccountId) throw new AppError('只能恢复由当前账号创建的示例项目',403);
+      if (index.projectIds.includes(id)) return {state:current,reused:true,restored:false};
+      if (index.projectIds.some(projectId => sampleOwner(states.get(projectId)) === ownerAccountId)) throw new AppError('当前账号已有活跃示例，请先移除后再恢复另一份',409);
+      const nextIndex = {...index,revision:index.revision+1,projectIds:[...index.projectIds,id],defaultProjectId:index.defaultProjectId||id,
+        archivedProjects:(index.archivedProjects || []).filter(item=>item.id!==id)};
+      writeJSON(indexPath,nextIndex); index = nextIndex;
+      return {state:current,reused:false,restored:true};
     },
     reset(requestedId, { preserveProject = false } = {}) {
       const id = resolveId(requestedId), current = states.get(id);
@@ -192,7 +300,7 @@ export function createWorkspace(dataDir, { seedDemo = false } = {}) {
       return save(id, next);
     },
     artifact(pathname) {
-      for (const state of states.values()) {
+      for (const state of index.projectIds.map(id => states.get(id))) {
         const artifact = state.tasks.flatMap(task => task.artifacts || []).find(item => item.url === pathname && item.fileName);
         if (artifact) return artifact;
       }

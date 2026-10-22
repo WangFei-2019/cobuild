@@ -8,6 +8,7 @@ import { createWorkspace } from './workspace.mjs';
 import { createIdentity } from './identity.mjs';
 import { peopleSummary, personDetails, projectWithProfiles } from './people.mjs';
 import { dashboardSummary } from './dashboard.mjs';
+import { buildSampleState, sampleProjectInput, markSampleState, isSampleState, sampleOwner, sampleInfo } from './sample.mjs';
 import { aiStatus, generatePlan, applyPlanDraft, applyMilestoneAction, reconcileMilestones, generateReplan, previewReplan, applyReplanDraft } from './planning.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -73,10 +74,27 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
   const deployment = deploymentURL(publicUrl);
   const secureCookie = deployment?.protocol === 'https:';
   const remoteDeployment = deployment && !loopbackHost(deployment.hostname);
-  const workspace = createWorkspace(dataDir, { seedDemo });
-  const identity = authRequired ? createIdentity(dataDir) : null;
+  let workspace, identity;
+  function virtualSamplePerson(personId) {
+    return Boolean(identity?.memberships(personId).some(link => {
+      const state = workspace.allStoredStates().find(item => item.project.id === link.projectId);
+      return isSampleState(state) && state.members.some(member => member.id === link.memberId && member.virtual === true);
+    }));
+  }
+  function personVisible(personId) {
+    return !virtualSamplePerson(personId) || identity.memberships(personId).some(link => workspace.isActive(link.projectId));
+  }
+  identity = authRequired ? createIdentity(dataDir, { projectAvailable: id => workspace.isActive(id) && !isSampleState(workspace.storedState(id)), personVisible }) : null;
+  // Recover any interrupted cross-store operation before project JSON is read
+  // or syncProject can treat an orphan member as an unbound legacy profile.
+  try { workspace = createWorkspace(dataDir, { seedDemo, operationCommitted:identity ? id=>identity.operationCommitted(id) : undefined }); }
+  catch(error) { identity?.close(); throw error; }
   const aiRequests = aiLimiter();
-  if (identity) for (const state of workspace.allStates()) identity.syncProject(state);
+  if (identity) for (const state of workspace.allStoredStates()) {
+    const owner = isSampleState(state) ? identity.user(sampleOwner(state)) : null;
+    if (isSampleState(state) && !owner) throw new Error('示例创建账号已不存在，请检查身份数据库');
+    identity.syncProject(state, owner ? new Map([['m0',{personId:owner.personId,accessRole:'admin'}]]) : undefined);
+  }
   const revision = () => workspace.view().revision + (identity?.revision() || 0);
 
   function send(res, status, value, type = 'application/json; charset=utf-8', extra = {}) {
@@ -102,18 +120,20 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
   function canRead(state, user) { return user.workspaceRole === 'admin' || Boolean(identity.membership(state.project.id, user.personId)); }
   function visibleStates(user) { return authRequired ? workspace.allStates().filter(state => canRead(state, user)).map(state => projectWithProfiles(state,identity)) : workspace.allStates(); }
   const peoplePermissions = user => ({managePeople:user?.workspaceRole === 'admin',createPerson:user?.workspaceRole === 'admin',editProfile:user?.workspaceRole === 'admin'});
-  const profileView = (person,user) => ({...person,permissions:{editProfile:user?.workspaceRole === 'admin'}});
+  const userCanEditProfile = (person,user) => user?.workspaceRole === 'admin' && !virtualSamplePerson(person.id);
+  const profileView = (person,user) => ({...person,permissions:{editProfile:userCanEditProfile(person,user)}});
   function requirePeopleManager(user) { if (!identity || user?.workspaceRole !== 'admin') throw new AppError('请由工作区管理员维护统一人员档案',403); }
   function permissions(state, user) {
     const membership = identity.membership(state.project.id, user.personId);
-    const manageProject = user.workspaceRole === 'admin' || membership?.accessRole === 'admin';
+    const sample = isSampleState(state);
+    const manageProject = sample ? sampleOwner(state) === user.id : user.workspaceRole === 'admin' || membership?.accessRole === 'admin';
     const write = manageProject || membership?.accessRole === 'member';
-    return { manageProject, createTask:Boolean(write), readOnly:!write };
+    return { manageProject, createTask:Boolean(write), readOnly:!write, ...(sample ? {manageMembers:false} : {}) };
   }
   function decoratedState(state, user) {
     if (!authRequired) return state;
     const named = projectWithProfiles(state,identity);
-    return { ...named, members:named.members.map(member => ({...member, ...identity.member(state.project.id, member.id)})), currentMemberId:identity.membership(state.project.id,user.personId)?.memberId || null, permissions:permissions(state,user) };
+    return { ...named, sample:sampleInfo(state,user.id), members:named.members.map(member => ({...member, ...identity.member(state.project.id, member.id)})), currentMemberId:identity.membership(state.project.id,user.personId)?.memberId || null, permissions:permissions(state,user) };
   }
   function workspaceView(user) {
     if (!authRequired) return workspace.view();
@@ -122,7 +142,8 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
     value.currentPersonId = user.personId;
     value.permissions = { createProject:true, manageWorkspace:user.workspaceRole === 'admin' };
     value.projects = value.projects.map(project => { const named = projectWithProfiles(workspace.state(project.id),identity); return { ...project,
-      ownerName:named.members.find(member=>member.id==='m0')?.name || '', permissions:permissions(named,user), members:named.members.map(member => ({...member,...identity.member(project.id,member.id)})) }; });
+      ownerName:named.members.find(member=>member.id==='m0')?.name || '', sample:sampleInfo(named,user.id), permissions:permissions(named,user), members:named.members.map(member => ({...member,...identity.member(project.id,member.id)})) }; });
+    value.archivedSamples = workspace.archivedEntries().filter(({state})=>sampleOwner(state)===user.id).map(({state,archivedAt})=>archivedSample(state,archivedAt));
     return value;
   }
   function access(requestedId, user, { manage = false, write = false } = {}) {
@@ -154,8 +175,8 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       }
       return value;
     })};
-    workspace.save(projectId,clean);
-    if (identity) identity.syncProject(clean,bindings);
+    if (stored.sample !== undefined) clean.sample = structuredClone(stored.sample); else delete clean.sample;
+    workspace.save(projectId,clean,{persist:identity ? effect=>identity.syncProject(clean,bindings,effect) : undefined});
     return clean;
   }
   function joinProject(projectId,person) {
@@ -166,13 +187,14 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
     next.members.push({id:memberId,name:person.name,role:'项目协作者',color:person.color,initial:person.initial});
     next.activities.unshift({id:`event-${randomUUID()}`,actorId:memberId,taskId:'',kind:'member',text:`${person.name}接受邀请加入项目。`,createdAt:new Date().toISOString()});
     next.revision += 1;
-    // Identity.claim owns the surrounding SQLite transaction and adds the mapping itself.
-    workspace.save(projectId,next);
-    return memberId;
+    // The identity transaction writes all SQL first, then commits the staged
+    // JSON synchronously; any failure compensates the exact prior snapshot.
+    return {memberId,effect:workspace.stageSave(projectId,next)};
   }
   function ensureAdministratorMemberships(user) {
     if (!identity || user.workspaceRole !== 'admin') return;
     for (const state of workspace.allStates()) {
+      if (isSampleState(state)) continue;
       const existing = identity.membership(state.project.id,user.personId);
       if (existing && state.members.some(member => member.id === existing.memberId)) continue;
       const next = structuredClone(state), person = identity.person(user.personId), memberId = existing?.memberId || `manager-${randomUUID()}`;
@@ -183,11 +205,13 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
     }
   }
   function visiblePerson(personId,user) {
+    if (!personVisible(personId)) throw new AppError('没有找到这个成员档案',404);
     const person = identity.person(personId);
     if (user.workspaceRole !== 'admin' && personId !== user.personId && !visibleStates(user).some(state => state.members.some(member => identity.member(state.project.id,member.id)?.personId === personId))) throw new AppError('没有找到这个成员档案',404);
     return person;
   }
   function selectablePerson(personId,user) {
+    if (virtualSamplePerson(personId)) throw new AppError('示例虚拟伙伴不能加入真实项目或绑定账号',403);
     const person = identity.person(personId);
     return person.accountLinked || user.workspaceRole === 'admin' ? person : visiblePerson(personId,user);
   }
@@ -205,6 +229,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       if (!plainObject(member) || Object.keys(member).some(key => !['name','personId','role'].includes(key))) throw new AppError('初始成员格式不正确');
       if ('personId' in member) {
         const person = visiblePerson(member.personId,user);
+        if (virtualSamplePerson(person.id)) throw new AppError('示例虚拟伙伴不能加入真实项目',403);
         if (person.accountLinked && person.id !== user.personId) throw new AppError('已有账号需要本人接受项目邀请后加入',403);
         if (seen.has(person.id)) throw new AppError('同一人员不能重复加入项目');
         seen.add(person.id); bindings.set(`m${index+1}`,{personId:person.id,accessRole:'member'});
@@ -222,9 +247,17 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
         bindings.set(actorId,{personId:user.personId,accessRole:'admin'});
       }
       state.activities[0].actorId = actorId;
-    }});
-    identity.syncProject(result.state,bindings);
+    },persist(state,effect) { identity.syncProject(state,bindings,effect); }});
     return {state:decoratedState(result.state,user),workspace:workspaceView(user)};
+  }
+  function archivedSample(state,archivedAt) {
+    return {id:state.project.id,name:state.project.name,color:state.project.color,revision:state.revision,archivedAt,sample:{version:1,canRestore:true}};
+  }
+  function requireSampleMembersFixed(state) {
+    if (isSampleState(state)) throw new AppError('示例使用固定虚拟成员，仅供体验流程；真实协作请创建自己的项目',403);
+  }
+  function sampleResult(state,user,{reused=false,restored=false}={}) {
+    return {state:decoratedState(state,user),workspace:workspaceView(user),reused,restored};
   }
 
   const server = http.createServer(async (req,res) => {
@@ -273,7 +306,31 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       }
       if (pathname.startsWith('/api/')) {
         if (authRequired && !currentUser) throw new AppError('请先登录工作区',401);
-        if (currentUser) ensureAdministratorMemberships(currentUser);
+        if (currentUser && !pathname.startsWith('/api/samples')) ensureAdministratorMemberships(currentUser);
+      }
+      if (req.method === 'POST' && ['/api/samples','/api/samples/archive','/api/samples/restore'].includes(pathname)) {
+        if (!identity) throw new AppError('示例生命周期需要登录账号',403);
+        const input = await body(req,16*1024), allowed = pathname === '/api/samples' ? [] : pathname.endsWith('/archive') ? ['projectId','expectedRevision'] : ['projectId'];
+        if (Object.keys(input).some(key=>!allowed.includes(key))) throw new AppError('示例请求包含不支持的字段');
+        if (pathname !== '/api/samples' && typeof input.projectId !== 'string') throw new AppError('请指定示例项目');
+        if (pathname.endsWith('/archive')) {
+          const result = workspace.archiveSample(input.projectId,{ownerAccountId:currentUser.id,expectedRevision:input.expectedRevision});
+          return send(res,200,{workspace:workspaceView(currentUser),archivedSample:archivedSample(result.state,result.archivedAt),alreadyArchived:result.alreadyArchived});
+        }
+        if (pathname.endsWith('/restore')) {
+          const result = workspace.restoreSample(input.projectId,{ownerAccountId:currentUser.id});
+          return send(res,200,sampleResult(result.state,currentUser,result));
+        }
+        const existing = workspace.allStoredStates().find(state=>sampleOwner(state)===currentUser.id);
+        if (existing) {
+          const result = workspace.restoreSample(existing.project.id,{ownerAccountId:currentUser.id});
+          return send(res,200,sampleResult(result.state,currentUser,result));
+        }
+        const owner = identity.person(currentUser.personId);
+        const result = workspace.create(sampleProjectInput(owner.name),{allowDuplicateNames:true,
+          decorate(state) { Object.assign(state,markSampleState(buildSampleState(state),currentUser.id)); },
+          persist(state,effect) { identity.syncProject(state,new Map([['m0',{personId:owner.id,accessRole:'admin'}]]),effect); }});
+        return send(res,201,sampleResult(result.state,currentUser));
       }
       if (req.method === 'GET' && pathname === '/api/workspace') return send(res,200,workspaceView(currentUser));
       if (req.method === 'GET' && pathname === '/api/dashboard') {
@@ -288,14 +345,15 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
         if (selectable.length) {
           access(selectable[0],currentUser,{manage:true});
           const visibleIds = new Set(peopleSummary(identity,visibleStates(currentUser),currentUser).map(person=>person.id));
-          people = identity.people().filter(person=>person.accountLinked || visibleIds.has(person.id)).map(person => visibleIds.has(person.id) ? person :
+          people = identity.people().filter(person=>!virtualSamplePerson(person.id) && (person.accountLinked || visibleIds.has(person.id))).map(person => visibleIds.has(person.id) ? person :
             {id:person.id,name:person.name,color:person.color,initial:person.initial,accountLinked:person.accountLinked});
         } else people = peopleSummary(identity,visibleStates(currentUser),currentUser);
         return send(res,200,{revision:revision(),permissions:peoplePermissions(currentUser),people:people.map(person=>profileView(person,currentUser))});
       }
       if (req.method === 'GET' && /^\/api\/people\/[A-Za-z0-9_-]+$/.test(pathname)) {
+        visiblePerson(pathname.split('/').at(-1),currentUser);
         const detail = personDetails(identity,visibleStates(currentUser),currentUser,pathname.split('/').at(-1));
-        return send(res,200,{...detail,person:profileView(detail.person,currentUser),revision:revision(),permissions:peoplePermissions(currentUser)});
+        return send(res,200,{...detail,person:profileView(detail.person,currentUser),revision:revision(),permissions:{...peoplePermissions(currentUser),editProfile:userCanEditProfile(detail.person,currentUser)}});
       }
       if (req.method === 'POST' && (pathname === '/api/people' || /^\/api\/people\/[A-Za-z0-9_-]+$/.test(pathname))) {
         requirePeopleManager(currentUser);
@@ -305,13 +363,14 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
         if (input.allowDuplicateName !== undefined && typeof input.allowDuplicateName !== 'boolean') throw new AppError('同名档案确认参数不正确');
         if (!create && (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision !== revision())) throw new AppError('人员目录已有更新，请刷新档案后重新保存',409);
         const {allowDuplicateName=false,...fields} = input;
+        if (!create && virtualSamplePerson(pathname.split('/').at(-1))) throw new AppError('示例虚拟伙伴使用固定档案，不能修改为真实人员',403);
         const person = create ? identity.createPerson(fields,{allowDuplicateName}) : identity.updatePerson(pathname.split('/').at(-1),input.patch,{allowDuplicateName});
         return send(res,create?201:200,{person:profileView(person,currentUser),revision:revision(),permissions:peoplePermissions(currentUser),session:sessionView(identity.user(currentUser.id))});
       }
       if (req.method === 'GET' && ['/api/state','/api/export','/api/report'].includes(pathname)) {
         const context = access(queryProjectId(),currentUser);
         if (pathname === '/api/state') return send(res,200,decoratedState(context.state,currentUser));
-        if (pathname === '/api/export') return send(res,200,context.state,'application/json; charset=utf-8',{'Content-Disposition':'attachment; filename="cobuild-project.json"'});
+        if (pathname === '/api/export') return send(res,200,{...context.state,...(authRequired ? {sample:sampleInfo(context.state,currentUser.id)} : {})},'application/json; charset=utf-8',{'Content-Disposition':'attachment; filename="cobuild-project.json"'});
         return send(res,200,projectReport(context.state),'text/markdown; charset=utf-8',{'Content-Disposition':`attachment; filename="cobuild-report.md"; filename*=UTF-8''${encodeURIComponent('共建项目进展.md')}`});
       }
       if (req.method === 'GET' && /^\/api\/files\/[a-f0-9-]+$/.test(pathname)) {
@@ -324,6 +383,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       if (req.method === 'POST' && pathname === '/api/projects') return send(res,201,createProject(await body(req),currentUser));
       if (req.method === 'POST' && pathname === '/api/project-members') {
         const input = await body(req), context = access(input.projectId,currentUser,{manage:true});
+        requireSampleMembersFixed(context.state);
         if (!identity) throw new AppError('请使用真实账号模式添加已有人员');
         const person = selectablePerson(input.personId,currentUser), role = validRole(input.accessRole);
         if (identity.membership(context.projectId,person.id)) throw new AppError('该人员已经是项目成员',409);
@@ -335,10 +395,12 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       }
       if (req.method === 'GET' && pathname === '/api/invitations') {
         const context = access(queryProjectId(),currentUser,{manage:true});
+        requireSampleMembersFixed(context.state);
         return send(res,200,{revision:revision(),invitations:identity.invitations(context.projectId)});
       }
       if (req.method === 'POST' && pathname === '/api/invitations') {
         const input = await body(req), context = access(input.projectId,currentUser,{manage:true});
+        requireSampleMembersFixed(context.state);
         if (input.personId) selectablePerson(input.personId,currentUser);
         const invitation = identity.invite({...input,projectId:context.projectId},currentUser);
         const {token:inviteToken,...value} = invitation;
@@ -357,6 +419,10 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       if (req.method === 'GET' && pathname === '/api/ai/status') {
         if (authRequired && currentUser.workspaceRole !== 'admin') throw new AppError('请由工作区管理员查看模型配置',403);
         return send(res,200,{...aiStatus(),limits:aiRequests.limits});
+      }
+      if (req.method === 'GET' && pathname === '/api/ai/capabilities') {
+        const context = access(queryProjectId(),currentUser), configured = Boolean(aiStatus().configured);
+        return send(res,200,{configured,samplePlanning:false,canGenerate:Boolean(context.permissions.manageProject && configured)});
       }
       if (req.method === 'POST' && ['/api/ai/plan','/api/ai/replan','/api/plans/apply','/api/plans/preview','/api/plans/replan','/api/milestones/action'].includes(pathname)) {
         const input = await body(req), context = access(input.projectId,currentUser,{manage:true}), action = actingInput(input,context);
@@ -379,6 +445,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       }
       if (req.method === 'POST' && pathname === '/api/action') {
         const input = await body(req), context = access(input.projectId,currentUser,{write:true}), action = actingInput(input,context);
+        if (['addMember','updateMember'].includes(action.type)) requireSampleMembersFixed(context.state);
         if (authRequired && ['addMember','updateMember','updateProject'].includes(action.type) && !context.permissions.manageProject) throw new AppError('请由项目管理者进行此操作',403);
         if (action.type === 'updateMember' && !Number.isSafeInteger(action.expectedRevision)) throw new AppError('请提供成员编辑所依据的项目版本');
         let filePath;
