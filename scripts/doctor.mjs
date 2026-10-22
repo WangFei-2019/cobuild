@@ -55,6 +55,12 @@ if (runtimeOK && env) {
       else process.env.COBUILD_AI_API_KEY = previous;
     }
   } catch { add('ai', 'error', '无法检查模型模块，请核对发布文件完整性。'); }
+  try {
+    const {mailStatus} = await import('../mail.mjs');
+    const status = mailStatus({env, publicUrl:env.COBUILD_PUBLIC_URL || ''});
+    const requested = ['COBUILD_MAIL_FROM','COBUILD_MAIL_API_KEY'].some(name => env[name]?.trim());
+    add('mail', status.configured ? 'ok' : requested ? 'error' : 'info', status.configured ? '邮件配置字段通过；未请求邮件服务，仍需验证发信域名与实际投递。' : requested ? '邮件配置不完整或无效，请检查服务端配置；未显示配置内容。' : '未配置邮件，邮箱验证与密码找回暂不可用；日常协作仍可用。');
+  } catch { add('mail', 'error', '无法检查邮件模块，请核对发布文件完整性。'); }
 }
 const report = {ok: !checks.some(check => check.level === 'error'), checks};
 if (flags.has('--json')) process.stdout.write(JSON.stringify(report, null, 2) + '\n');

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { AppError, applyAction, analyzeUpdate, projectReport } from '../domain.mjs';
 import { applyPlanDraft, validatePlanDraft, applyMilestoneAction, reconcileMilestones, previewReplan, applyReplanDraft } from '../planning.mjs';
 import { dashboardSummary } from '../dashboard.mjs';
+import {deriveNotifications,notificationReadIds,notificationView} from '../notifications.mjs';
 import { buildSampleState, markSampleState, isSampleState, sampleOwner, sampleInfo, sampleProjectInput } from '../sample.mjs';
 import { peopleSummary, personDetails, profileFields, checkProfileDuplicates, projectWithProfiles } from '../people.mjs';
 
@@ -32,6 +33,8 @@ function dataShape(value) {
       && ['members', 'tasks', 'activities', 'decisions'].every(key => Array.isArray(state[key])))
     && (value.projects.length ? value.projects.some(state => state.project.id === value.defaultProjectId) : value.defaultProjectId === null)
     && (!Object.hasOwn(value,'archivedSamples') || Array.isArray(value.archivedSamples) && value.archivedSamples.every(entry => record(entry) && isSampleState(entry.state) && typeof entry.archivedAt === 'string'))
+    && (!Object.hasOwn(value,'archivedProjects') || Array.isArray(value.archivedProjects) && value.archivedProjects.every(entry=>record(entry)&&!isSampleState(entry.state)&&entry.state?.project?.id&&typeof entry.archivedAt==='string'))
+    && (!Object.hasOwn(value,'notificationReads') || record(value.notificationReads)&&Object.values(value.notificationReads).every(ids=>Array.isArray(ids)&&ids.every(id=>typeof id==='string'&&/^[a-f0-9]{64}$/.test(id))))
     && value.people.some(person => person.id === value.currentPersonId)
     && (!Object.hasOwn(value,'onboarding') || validOnboarding(value.onboarding));
 }
@@ -93,9 +96,9 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
   }
   function user(doc) {
     const person = identity(doc).person(doc.currentPersonId);
-    return { id: 'demo-experience-session', name: person.name, email: 'demo@local.invalid', personId: person.id, workspaceRole: 'admin', demo: true };
+    return { id: 'demo-experience-session', name: person.name, email: 'demo@local.invalid', personId: person.id, workspaceRole: 'admin', emailVerified:false,demo: true };
   }
-  const session = doc => ({ setupRequired: false, setupTokenRequired: false, demo: true, user: user(doc), onboarding:onboardingState(doc) });
+  const session = doc => ({ setupRequired: false, setupTokenRequired: false, demo: true, user: user(doc), onboarding:onboardingState(doc),capabilities:{mailConfigured:false} });
   function stateFor(doc, projectId) {
     const id = projectId === undefined ? doc.defaultProjectId : projectId;
     if (id === null && projectId === undefined) throw new AppError('当前演示没有可见项目',404);
@@ -109,7 +112,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     const adapter = identity(doc);
     const named = projectWithProfiles(state,adapter);
     return { ...clone(named), demo: true, members: named.members.map(member => ({ ...clone(member), ...adapter.member(state.project.id, member.id) })),
-      currentMemberId: adapter.membership(state.project.id, doc.currentPersonId)?.memberId || null, sample:sampleInfo(state,user(doc).id), permissions: { ...permissions, ...(isSampleState(state)?{manageMembers:false}:{}) } };
+      currentMemberId: adapter.membership(state.project.id, doc.currentPersonId)?.memberId || null, sample:sampleInfo(state,user(doc).id), permissions: { ...permissions,canArchive:!isSampleState(state), ...(isSampleState(state)?{manageMembers:false}:{}) } };
   }
   function authorized(doc, state) {
     const value = decorate(doc, state);
@@ -118,7 +121,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
   }
   function workspace(doc) {
     return { revision: doc.revision, defaultProjectId: doc.defaultProjectId, currentPersonId: doc.currentPersonId, demo: true,
-      permissions: { createProject: true, manageWorkspace: true }, archivedSamples:(doc.archivedSamples || []).filter(entry=>sampleOwner(entry.state)===user(doc).id).map(archivedSampleView), projects: doc.projects.map(state => {
+      permissions: { createProject: true, manageWorkspace: true }, archivedProjects:(doc.archivedProjects||[]).map(archivedProjectView),archivedSamples:(doc.archivedSamples || []).filter(entry=>sampleOwner(entry.state)===user(doc).id).map(archivedSampleView), projects: doc.projects.map(state => {
         const value = decorate(doc, state), p = state.project;
         return { ...clone(p), description: p.description || '', goal: p.goal || '', deadline: p.deadline || '', color: p.color || '#427b68',
           ownerName: value.members.find(member => member.id === 'm0')?.name || '', memberCount: state.members.length,
@@ -196,6 +199,27 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     const {state,archivedAt}=entry;
     return {id:state.project.id,name:state.project.name,color:state.project.color,revision:state.revision,archivedAt,sample:{version:1,canRestore:true}};
   }
+  const archivedProjectView=entry=>({id:entry.state.project.id,name:entry.state.project.name,color:entry.state.project.color||'#427b68',revision:entry.state.revision,archivedAt:entry.archivedAt,canRestore:true});
+  function realProjectArchive(doc,input,restore){
+    sampleInput(input,restore?['projectId']:['projectId','expectedRevision']);
+    const active=doc.projects.find(state=>state.project.id===input.projectId),entry=(doc.archivedProjects||[]).find(item=>item.state.project.id===input.projectId),state=active||entry?.state;
+    if(!state)throw new AppError('没有找到这个项目',404);
+    if(isSampleState(state))throw new AppError('示例请使用专属移除与恢复入口',403);
+    if(restore){
+      if(active)return {state:decorate(doc,state),workspace:workspace(doc),reused:true,restored:false};
+      doc.projects.push(state);doc.archivedProjects=doc.archivedProjects.filter(item=>item!==entry);doc.defaultProjectId ||=state.project.id;doc.revision+=1;persist(doc);
+      return {state:decorate(doc,state),workspace:workspace(doc),reused:false,restored:true};
+    }
+    if(!Number.isSafeInteger(input.expectedRevision))throw new AppError('请提供归档所依据的项目版本');
+    if(input.expectedRevision!==state.revision)throw new AppError('项目已有更新，请核对最新内容后再归档',409);
+    if(entry)return {workspace:workspace(doc),archivedProject:archivedProjectView(entry),alreadyArchived:true};
+    const archived={state:clone(state),archivedAt:now().toISOString()};doc.archivedProjects=[...(doc.archivedProjects||[]),archived];doc.projects=doc.projects.filter(item=>item!==active);
+    if(doc.defaultProjectId===state.project.id)doc.defaultProjectId=doc.projects[0]?.project.id||null;doc.revision+=1;persist(doc);
+    return {workspace:workspace(doc),archivedProject:archivedProjectView(archived),alreadyArchived:false};
+  }
+  function inbox(doc){return deriveNotifications(identity(doc),visibleStates(doc),user(doc),{now:now()});}
+  function inboxView(doc){return notificationView(inbox(doc),new Set(doc.notificationReads?.[user(doc).id]||[]));}
+  function accountView(doc){const person=identity(doc).person(doc.currentPersonId);return {account:{...user(doc),bio:person.bio||'',color:person.color,initial:person.initial,emailVerified:false,emailVerifiedAt:''},capabilities:{mailConfigured:false}};}
   function sampleInput(input,keys) {
     if(Object.keys(input).length!==keys.length || Object.keys(input).some(key=>!keys.includes(key))) throw new AppError('示例请求包含不支持的字段');
     if(keys.includes('projectId') && (typeof input.projectId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(input.projectId))) throw new AppError('项目标识不正确');
@@ -299,7 +323,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     doc.files[id] = { name, base64: file.base64, size: binary.length };
     action.url = `/api/files/${id}`; action.fileMeta = { name, size: binary.length }; delete action.file;
   }
-  async function request(inputURL, payload, { signal } = {}) {
+  async function request(inputURL, payload, { signal,method } = {}) {
     if (signal?.aborted) throw new DOMException('操作已取消', 'AbortError');
     const url = new URL(inputURL, 'https://cobuild-demo.invalid'), path = url.pathname;
     if (url.origin !== 'https://cobuild-demo.invalid') throw new AppError('演示适配器仅支持本地API路径');
@@ -308,11 +332,14 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     const doc = load(), adapter = identity(doc), current = user(doc), input = payload || {};
     const ids = url.searchParams.getAll('projectId'); if (ids.length > 1) throw new AppError('请只指定一个项目');
     const projectId = payload === undefined ? (ids.length ? ids[0] : undefined) : input.projectId;
+    if(['/api/account/password','/api/account/email-verification','/api/auth/forgot-password','/api/auth/reset-password','/api/auth/verify-email'].includes(path)){const error=new AppError(path.endsWith('/password')?'演示版不能更改真实密码，请使用正式账号服务。':'演示版没有邮件服务，未发送邮件、未验证邮箱或修改密码。',503);error.code=path.endsWith('/password')?'DEMO_UNAVAILABLE':'MAIL_NOT_CONFIGURED';throw error;}
     if (path.startsWith('/api/invitations') || (path.startsWith('/api/auth/') && !['/api/auth/session', '/api/auth/logout', '/api/auth/onboarding'].includes(path))) unavailable();
     if (payload === undefined) {
       if (path === '/api/auth/session') return session(doc);
       if (path === '/api/health') return { ok: true, demo: true, app: 'cobuild', authRequired: false };
       if (path === '/api/workspace') return workspace(doc);
+      if(path==='/api/account')return accountView(doc);
+      if(path==='/api/notifications')return inboxView(doc);
       if (path === '/api/dashboard') { const queries = url.searchParams.getAll('q'); if (queries.length > 1) throw new AppError('请只指定一个搜索内容'); return { demo: true, revision: doc.revision, ...dashboardSummary(adapter, visibleStates(doc), current, { query: queries[0] || '', now: now() }) }; }
       if (path === '/api/people') {
         const selected=url.searchParams.getAll('selectableForProject');if(selected.length>1)throw new AppError('请只指定一个项目');
@@ -328,6 +355,16 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
       throw new AppError('演示接口不存在', 404);
     }
     if (path === '/api/auth/logout') return session(doc);
+    if(path==='/api/account'){
+      if(method!=='PATCH')throw new AppError('账户资料请使用 PATCH',405);
+      const patch=profileFields(input,{partial:true}),person=identity(doc).person(doc.currentPersonId),normalized=value=>value.trim().normalize('NFKC').trim().toLowerCase();
+      if(patch.name&&normalized(patch.name)!==normalized(person.name)&&doc.people.some(item=>item.id!==person.id&&item.accountLinked&&normalized(item.name)===normalized(patch.name))){const error=new AppError('该昵称已被占用',409);error.code='NAME_TAKEN';error.field='name';throw error;}
+      Object.assign(doc.people.find(item=>item.id===person.id),patch);doc.revision+=1;persist(doc);return {...accountView(doc),session:session(doc)};
+    }
+    if(path==='/api/notifications/read'){
+      const selected=notificationReadIds(input,inbox(doc)),accountId=user(doc).id,previous=new Set(doc.notificationReads?.[accountId]||[]);for(const id of selected)previous.add(id);
+      doc.notificationReads={...(doc.notificationReads||{}),[accountId]:[...previous]};persist(doc);return inboxView(doc);
+    }
     if (path === '/api/auth/onboarding') {
       if (Object.keys(input).length !== 1 || !Object.hasOwn(input,'status') || !['dismissed','completed'].includes(input.status)) throw new AppError('使用指引仅支持当前体验账号的 dismissed 或 completed 状态');
       const previous = onboardingState(doc);
@@ -343,6 +380,7 @@ export function createDemoAPI({ storage = globalThis.localStorage, key = DEMO_ST
     if (path === '/api/samples/archive') return archiveSample(doc,input);
     if (path === '/api/samples/restore') {sampleInput(input,['projectId']);return restoreSample(doc,input.projectId);}
     if (path === '/api/projects') return createProject(doc, input);
+    if(path==='/api/projects/archive'||path==='/api/projects/restore')return realProjectArchive(doc,input,path.endsWith('/restore'));
     const state = stateFor(doc, projectId), action = actor(doc, state, input);
     if(isSampleState(state) && (path==='/api/project-members'||path==='/api/action'&&['addMember','updateMember'].includes(action.type)))throw new AppError('示例使用固定虚拟伙伴，真实协作请创建自己的项目',403);
     if (path === '/api/ai/plan' || path === '/api/ai/replan') return samplePlan(doc, state, input, path.endsWith('/replan'));

@@ -3,7 +3,7 @@ import {readFileSync, statSync} from 'node:fs';
 // Shared by the launcher and read-only diagnostics; credential values never enter reports.
 export function runtimeEnvironment(source = process.env) {
   const env = {...source};
-  for (const name of ['COBUILD_SETUP_TOKEN', 'COBUILD_AI_API_KEY']) {
+  for (const name of ['COBUILD_SETUP_TOKEN', 'COBUILD_AI_API_KEY', 'COBUILD_MAIL_API_KEY']) {
     const file = env[name + '_FILE'];
     let value = env[name] || '';
     if (file) {

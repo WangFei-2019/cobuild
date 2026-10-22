@@ -32,6 +32,10 @@ function accessRole(value = 'member') {
   if (!roles.has(value)) throw new AppError('项目访问角色不正确');
   return value;
 }
+function strictFields(input,allowed) {
+  if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(key=>!allowed.includes(key)))throw new AppError('请求包含不支持的账号字段');
+}
+function invalidAccountToken() {const error=new AppError('链接无效、已使用或已过期，请重新申请',400);error.code='TOKEN_INVALID';return error;}
 
 export function createIdentity(dataDir, { projectAvailable = () => true, personVisible = () => true } = {}) {
   const path = join(dataDir, 'identity.sqlite');
@@ -45,6 +49,8 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
     CREATE TABLE IF NOT EXISTS sessions(tokenHash TEXT PRIMARY KEY,accountId TEXT NOT NULL REFERENCES accounts(id),createdAt TEXT NOT NULL,expiresAt TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS account_onboarding(accountId TEXT NOT NULL REFERENCES accounts(id),version INTEGER NOT NULL,status TEXT NOT NULL CHECK(status IN ('dismissed','completed')),updatedAt TEXT NOT NULL,PRIMARY KEY(accountId,version));
     CREATE TABLE IF NOT EXISTS project_operations(id TEXT PRIMARY KEY,committedAt TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS account_email_verification(accountId TEXT PRIMARY KEY REFERENCES accounts(id),verifiedAt TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS account_tokens(tokenHash TEXT PRIMARY KEY,purpose TEXT NOT NULL CHECK(purpose IN ('verify-email','reset-password')),accountId TEXT NOT NULL REFERENCES accounts(id),email TEXT NOT NULL,createdAt TEXT NOT NULL,expiresAt TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('pending','active','used','revoked')));
     CREATE TABLE IF NOT EXISTS project_members(projectId TEXT NOT NULL,memberId TEXT NOT NULL,personId TEXT NOT NULL REFERENCES people(id),accessRole TEXT NOT NULL,PRIMARY KEY(projectId,memberId),UNIQUE(projectId,personId));
     CREATE TABLE IF NOT EXISTS invitations(id TEXT PRIMARY KEY,tokenHash TEXT NOT NULL UNIQUE,projectId TEXT NOT NULL,memberId TEXT,personId TEXT REFERENCES people(id),email TEXT NOT NULL DEFAULT '',accessRole TEXT NOT NULL,createdBy TEXT NOT NULL REFERENCES accounts(id),createdAt TEXT NOT NULL,expiresAt TEXT NOT NULL,status TEXT NOT NULL,acceptedBy TEXT REFERENCES accounts(id),acceptedAt TEXT);
     CREATE TABLE IF NOT EXISTS login_attempts(key TEXT PRIMARY KEY,count INTEGER NOT NULL,windowStart INTEGER NOT NULL);`);
@@ -81,7 +87,7 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
     return result;
   };
   const accountCount = () => get('SELECT COUNT(*) AS count FROM accounts').count;
-  let registrationsInFlight = 0;
+  let registrationsInFlight = 0,credentialOperationsInFlight=0,deliveriesInFlight=0,closed=false;
   // Keep legacy names intact, including historical duplicates. Every new
   // account or changed effective nickname is checked in the same write
   // transaction as its mutation, rather than adding a destructive UNIQUE
@@ -104,8 +110,9 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
     return personId;
   }
   function user(accountId) {
-    const value = get('SELECT a.id,a.email,a.personId,a.workspaceRole,p.name FROM accounts a JOIN people p ON p.id=a.personId WHERE a.id=?', accountId);
-    return value ? { ...value } : null;
+    const value = get('SELECT a.id,a.email,a.personId,a.workspaceRole,p.name,v.verifiedAt FROM accounts a JOIN people p ON p.id=a.personId LEFT JOIN account_email_verification v ON v.accountId=a.id WHERE a.id=?', accountId);
+    if(!value)return null;
+    const {verifiedAt,...fields}=value;return {...fields,emailVerified:Boolean(verifiedAt)};
   }
   function onboarding(accountId) {
     if (!user(accountId)) throw new AppError('没有找到当前账号', 404);
@@ -177,19 +184,19 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
     return { salt, key: key.toString('hex') };
   }
   function rateKeys(ip, address) { return [[hash(`account:${ip}:${address}`), 5], [hash(`ip:${ip}`), 30]]; }
-  function checkRate(keys, message = '登录尝试过多，请稍后再试') {
+  function checkRate(keys, message = '登录尝试过多，请稍后再试',windowMs=15*60000) {
     for (const [key, limit] of keys) {
       const value = get('SELECT * FROM login_attempts WHERE key=?', key);
-      if (value && Date.now() - value.windowStart < 15 * 60000 && value.count >= limit) {
-        const error = new AppError(message, 429); error.retryAfter = Math.max(1, Math.ceil((value.windowStart + 15 * 60000 - Date.now()) / 1000)); throw error;
+      if (value && Date.now() - value.windowStart < windowMs && value.count >= limit) {
+        const error = new AppError(message, 429); error.retryAfter = Math.max(1, Math.ceil((value.windowStart + windowMs - Date.now()) / 1000)); throw error;
       }
     }
   }
-  function failed(keys) {
+  function failed(keys,windowMs=15*60000) {
     const reservations = [];
     for (const [key] of keys) {
       const value = get('SELECT * FROM login_attempts WHERE key=?', key);
-      const fresh = !value || Date.now() - value.windowStart >= 15 * 60000;
+      const fresh = !value || Date.now() - value.windowStart >= windowMs;
       const windowStart = fresh ? Date.now() : value.windowStart;
       run('INSERT INTO login_attempts VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET count=excluded.count,windowStart=excluded.windowStart', key, fresh ? 1 : value.count + 1, windowStart);
       reservations.push({ key, windowStart });
@@ -199,8 +206,51 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
   function releaseSuccessfulAttempt(reservations) {
     for (const { key, windowStart } of reservations) run('UPDATE login_attempts SET count=count-1 WHERE key=? AND windowStart=? AND count>0', key, windowStart);
   }
+  function accountView(accountId) {
+    const current=user(accountId);if(!current)throw new AppError('请先登录工作区',401);
+    const profile=person(current.personId),verifiedAt=get('SELECT verifiedAt FROM account_email_verification WHERE accountId=?',accountId)?.verifiedAt||'';
+    return {...current,name:profile.name,bio:profile.bio,color:profile.color,initial:profile.initial,emailVerifiedAt:verifiedAt};
+  }
+  function reserveMail(ip,address) {
+    if(deliveriesInFlight>=4){const error=new AppError('邮件请求较多，请稍后再试',429);error.retryAfter=1;throw error;}
+    transaction(()=>{
+      const cooldown=[[hash(`mail:cooldown:${address}`),1]],quota=[[hash(`mail:email:${address}`),5],[hash(`mail:ip:${ip}`),30]];
+      checkRate(cooldown,'请稍后再申请邮件',60000);checkRate(quota,'邮件申请次数过多，请稍后再试',3600000);
+      failed(cooldown,60000);failed(quota,3600000);
+    });
+  }
+  function activeToken(token,purpose) {
+    if(typeof token!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(token))throw invalidAccountToken();
+    const value=get('SELECT t.*,a.email AS currentEmail FROM account_tokens t JOIN accounts a ON a.id=t.accountId WHERE t.tokenHash=? AND t.purpose=?',hash(token),purpose);
+    if(!value||value.status!=='active'||value.expiresAt<=now()||value.email!==value.currentEmail)throw invalidAccountToken();
+    return value;
+  }
+  async function deliverToken(account,purpose,sendMail) {
+    const token=randomBytes(32).toString('base64url'),digest=hash(token);
+    const createdAt=now(),expiresAt=new Date(Date.now()+(purpose==='verify-email'?24*3600000:30*60000)).toISOString();
+    transaction(()=>run('INSERT INTO account_tokens VALUES(?,?,?,?,?,?,?)',digest,purpose,account.id,account.email,createdAt,expiresAt,'pending'));
+    deliveriesInFlight++;
+    try {
+      await sendMail({email:account.email,purpose,token});
+      if(closed)return false;
+      transaction(()=>{
+        if(user(account.id)?.email!==account.email)throw invalidAccountToken();
+        run("UPDATE account_tokens SET status='revoked' WHERE accountId=? AND purpose=? AND status='active'",account.id,purpose);
+        run("UPDATE account_tokens SET status='active' WHERE tokenHash=? AND status='pending'",digest);
+      });
+      return true;
+    } catch(error) {
+      if(!closed)run("DELETE FROM account_tokens WHERE tokenHash=? AND status='pending'",digest);
+      throw error;
+    } finally {deliveriesInFlight--;}
+  }
+  function reserveCredential(ip,key) {
+    if(credentialOperationsInFlight>=4){const error=new AppError('密码请求较多，请稍后再试',429);error.retryAfter=1;throw error;}
+    const keys=[[hash(`credential:target:${key}`),5],[hash(`credential:ip:${ip}`),30]];
+    checkRate(keys,'密码操作尝试过多，请稍后再试');return failed(keys);
+  }
   return {
-    close() { db.close(); }, revision() { return get("SELECT value FROM metadata WHERE key='revision'").value; },
+    close() { closed=true;db.close(); }, revision() { return get("SELECT value FROM metadata WHERE key='revision'").value; },
     operationCommitted(operationId) { return Boolean(get('SELECT 1 FROM project_operations WHERE id=?',operationId)); },
     setupRequired() { return accountCount() === 0; }, person,
     people() { return all('SELECT id FROM people').filter(value => personVisible(value.id)).map(value => person(value.id)); },
@@ -223,7 +273,73 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
         bump(); return person(personId);
       });
     },
-    user, onboarding,
+    user, onboarding,account:accountView,
+    updateAccount(accountId,patch) {
+      const fields=profileFields(patch,{partial:true});
+      return transaction(()=>{
+        const current=user(accountId);if(!current)throw new AppError('请先登录工作区',401);
+        const previous=person(current.personId),next={...previous,...fields};
+        if(nicknameKey(next.name)!==nicknameKey(previous.name))assertNicknameAvailable(next.name,accountId);
+        run('UPDATE people SET name=?,bio=?,color=?,initial=? WHERE id=?',next.name,next.bio,next.color,next.initial,current.personId);bump();return accountView(accountId);
+      });
+    },
+    requestPasswordReset(input,ip,sendMail) {
+      strictFields(input,['email']);const address=email(input.email);reserveMail(ip,address);
+      const account=get('SELECT id,email FROM accounts WHERE email=?',address);
+      if(account) {
+        // Queue the configured transport and return the same acknowledgement
+        // immediately for known/unknown accounts and provider failures.
+        void deliverToken(account,'reset-password',sendMail).catch(()=>{if(!closed)process.stderr.write('密码恢复邮件发送未完成，请检查邮件服务配置。\n');});
+      }
+      return {ok:true,message:'如果该邮箱已注册且邮件可送达，你将收到重置链接。'};
+    },
+    async requestEmailVerification(accountId,ip,sendMail) {
+      const account=accountView(accountId);
+      if(account.emailVerified)return {ok:true,alreadyVerified:true,message:'邮箱已验证'};
+      reserveMail(ip,account.email);await deliverToken(account,'verify-email',sendMail);
+      return {ok:true,message:'验证邮件已交给邮件服务，请检查收件箱'};
+    },
+    verifyEmail(input,ip) {
+      strictFields(input,['token']);const keys=[[hash(`verify:ip:${ip}`),60]];checkRate(keys,'验证尝试过多，请稍后再试');failed(keys);
+      return transaction(()=>{
+        const token=activeToken(input.token,'verify-email');
+        run('INSERT OR IGNORE INTO account_email_verification VALUES(?,?)',token.accountId,now());
+        run("UPDATE account_tokens SET status='used' WHERE tokenHash=?",token.tokenHash);
+        return {ok:true,message:'邮箱验证成功'};
+      });
+    },
+    async resetPassword(input,ip) {
+      strictFields(input,['token','password']);password(input.password);
+      const reservations=reserveCredential(ip,hash(String(input.token||''))),token=activeToken(input.token,'reset-password');credentialOperationsInFlight++;
+      try {
+        const fields=await passwordFields(input.password);
+        return transaction(()=>{
+          const latest=activeToken(input.token,'reset-password');
+          if(latest.accountId!==token.accountId)throw invalidAccountToken();
+          run('UPDATE accounts SET passwordSalt=?,passwordHash=? WHERE id=?',fields.salt,fields.key,latest.accountId);
+          run('DELETE FROM sessions WHERE accountId=?',latest.accountId);
+          run("UPDATE account_tokens SET status='revoked' WHERE accountId=? AND purpose='reset-password'",latest.accountId);
+          run("UPDATE account_tokens SET status='used' WHERE tokenHash=?",latest.tokenHash);releaseSuccessfulAttempt(reservations);
+          return {ok:true,message:'密码已重置，请使用新密码登录'};
+        });
+      } finally {credentialOperationsInFlight--;}
+    },
+    async changePassword(accountId,input,ip) {
+      strictFields(input,['currentPassword','newPassword']);password(input.newPassword);
+      const current=get('SELECT * FROM accounts WHERE id=?',accountId);if(!current)throw new AppError('请先登录工作区',401);
+      const reservations=reserveCredential(ip,accountId);credentialOperationsInFlight++;
+      try {
+        const supplied=await scrypt(typeof input.currentPassword==='string'&&input.currentPassword.length<=256?input.currentPassword:'',current.passwordSalt,64);
+        if(!timingSafeEqual(supplied,Buffer.from(current.passwordHash,'hex'))){const error=new AppError('当前密码不正确',403);error.code='CURRENT_PASSWORD_INVALID';error.field='currentPassword';throw error;}
+        const fields=await passwordFields(input.newPassword);
+        return transaction(()=>{
+          if(get('SELECT passwordHash FROM accounts WHERE id=?',accountId)?.passwordHash!==current.passwordHash){const error=new AppError('密码已在其他位置修改，请重新登录',409);error.code='CREDENTIALS_CHANGED';throw error;}
+          run('UPDATE accounts SET passwordSalt=?,passwordHash=? WHERE id=?',fields.salt,fields.key,accountId);run('DELETE FROM sessions WHERE accountId=?',accountId);
+          run("UPDATE account_tokens SET status='revoked' WHERE accountId=? AND purpose='reset-password'",accountId);releaseSuccessfulAttempt(reservations);
+          return {ok:true,message:'密码已更新，请重新登录'};
+        });
+      } finally {credentialOperationsInFlight--;}
+    },
     updateOnboarding(accountId, status) {
       if (!['dismissed','completed'].includes(status)) throw new AppError('指引状态只支持dismissed或completed');
       return transaction(() => {
@@ -264,10 +380,14 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
       const supplied = await scrypt(input.password, salt, 64);
       const expected = Buffer.from(account?.passwordHash || '0'.repeat(128), 'hex');
       if (!account || !timingSafeEqual(supplied, expected)) throw new AppError('邮箱或密码不正确', 401);
-      // Release only this successful request, never another request's failure or
-      // reservation. Proxies may put every legitimate user in the same IP bucket.
-      releaseSuccessfulAttempt(reservations);
-      return session(account.id);
+      return transaction(()=>{
+        // A reset/change may have committed while scrypt was running. Old
+        // credentials must never mint a fresh session after that revocation.
+        const latest=get('SELECT passwordSalt,passwordHash FROM accounts WHERE id=?',account.id);
+        if(!latest||latest.passwordSalt!==account.passwordSalt||latest.passwordHash!==account.passwordHash)throw new AppError('邮箱或密码不正确',401);
+        // Release only this successful request's own window reservation.
+        releaseSuccessfulAttempt(reservations);return session(account.id);
+      });
     },
     async register(input, joinProject, ip = 'unknown') {
       if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['name','email','password','inviteToken'].includes(key))) throw new AppError('注册仅支持昵称、邮箱、密码与可选邀请令牌');
@@ -350,6 +470,7 @@ export function createIdentity(dataDir, { projectAvailable = () => true, personV
     },
     resolveInvitation(token) { return publicInvitation(invitationByToken(token)); },
     invitations(projectId) { return all('SELECT * FROM invitations WHERE projectId=? ORDER BY createdAt DESC', projectId).map(publicInvitation); },
+    notificationInvitations(accountId) {return all("SELECT id,projectId,status,acceptedAt,createdAt,personId FROM invitations WHERE createdBy=? AND status='accepted' ORDER BY acceptedAt DESC,id",accountId).map(({personId,...value})=>({...value,memberName:personId?person(personId).name:''}));},
     invitation(idValue) { if (typeof idValue !== 'string') throw new AppError('邀请标识不正确'); const value = get('SELECT * FROM invitations WHERE id=?', idValue); if (!value) throw new AppError('邀请不存在', 404); return publicInvitation(value); },
     revoke(idValue) {
       const value = get('SELECT * FROM invitations WHERE id=?', idValue);

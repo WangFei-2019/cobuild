@@ -17,7 +17,7 @@ const publicFiles = new Set([
 const traversedDirectories = new Set(['src', 'public', 'scripts', 'tests', '.github', 'demo']);
 export const REQUIRED_RELEASE_FILES = Object.freeze([
   'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'server.mjs', 'domain.mjs',
-  'workspace.mjs', 'identity.mjs', 'people.mjs', 'dashboard.mjs', 'planning.mjs', 'insights.mjs', 'ai-exchange.mjs', 'tests/insights.test.mjs',
+  'workspace.mjs', 'identity.mjs', 'mail.mjs', 'notifications.mjs', 'notification-store.mjs', 'people.mjs', 'dashboard.mjs', 'planning.mjs', 'insights.mjs', 'ai-exchange.mjs', 'tests/insights.test.mjs',
   'scripts/build.mjs', 'scripts/start.mjs', 'scripts/runtime-config.mjs', 'scripts/doctor.mjs', 'scripts/backup.mjs', 'scripts/licenses.mjs',
   'scripts/package-release.mjs', 'scripts/release-manifest.mjs', 'scripts/verify-release.mjs',
   'public/index.html', 'public/app.js', 'public/app.css', 'public/THIRD_PARTY_NOTICES.txt',
@@ -45,7 +45,7 @@ export function hashFile(path) {
 export function assertSafeContent(path, bytes) {
   const content = bytes.toString('utf8');
   // Recognisable credentials only: fixture strings and variable names are not credentials.
-  const credential = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{30,}|gh[pousr]_[A-Za-z0-9]{30,}|\bsk-[A-Za-z0-9_-]{24,}/;
+  const credential = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{30,}|gh[pousr]_[A-Za-z0-9]{30,}|\bsk-[A-Za-z0-9_-]{24,}|\bre_[A-Za-z0-9_-]{24,}/;
   if (credential.test(content)) throw new Error('疑似凭据，拒绝打包：' + path);
 }
 

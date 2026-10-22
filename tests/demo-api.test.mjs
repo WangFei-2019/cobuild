@@ -298,3 +298,41 @@ test('演示报告与JSON导出使用最新权威人员姓名，原始项目历�
   assert.equal(exported.members.find(member=>member.id==='m0').name,'已更新的真实显示名');assert.deepEqual(downloadedExport,exported);
   assert.deepEqual(JSON.parse(storage.values.get(DEMO_STORAGE_KEY)).projects.find(item=>item.project.id===projectId),before);
 });
+
+test('演示真实项目归档恢复保留成果与原任务，通知已读本机持久且归档不泄露入口',async t=>{
+  t.mock.method(globalThis,'fetch',()=>{throw new Error('local only');});
+  const storage=memoryStorage(),demo=createDemoAPI({storage,now:time});
+  let state=(await demo.request('/api/projects',{name:'归档本地项目'})).state;const projectId=state.project.id;
+  state=(await demo.request('/api/action',{projectId,...taskInput(state)})).state;
+  const todo=state.tasks[0],before=await demo.request('/api/notifications'),notification=before.items.find(item=>item.taskId===todo.id);assert.ok(notification);
+  await demo.request('/api/notifications/read',{ids:[notification.id]});
+  assert.equal((await createDemoAPI({storage,now:time}).request('/api/notifications')).items.find(item=>item.id===notification.id).read,true);
+  const raw=structuredClone(JSON.parse(storage.values.get(DEMO_STORAGE_KEY)).projects.find(item=>item.project.id===projectId));
+  await assert.rejects(demo.request('/api/projects/archive',{projectId,expectedRevision:state.revision-1}),error=>error.status===409);
+  const archived=await demo.request('/api/projects/archive',{projectId,expectedRevision:state.revision});assert.equal(archived.archivedProject.canRestore,true);assert.ok(archived.workspace.archivedProjects.some(item=>item.id===projectId));
+  await assert.rejects(demo.request('/api/state?projectId='+projectId),error=>error.status===404);await assert.rejects(demo.download('/api/export?projectId='+projectId),error=>error.status===404);
+  assert.ok(!(await demo.request('/api/notifications')).items.some(item=>item.projectId===projectId));
+  await assert.rejects(demo.request('/api/notifications/read',{ids:[notification.id]}),error=>error.status===404);
+  const restored=await createDemoAPI({storage,now:time}).request('/api/projects/restore',{projectId});assert.equal(restored.restored,true);
+  assert.deepEqual(JSON.parse(storage.values.get(DEMO_STORAGE_KEY)).projects.find(item=>item.project.id===projectId),raw);
+  assert.equal((await demo.request('/api/notifications')).items.find(item=>item.id===notification.id).read,true);
+  assert.equal((await demo.request('/api/projects/restore',{projectId})).reused,true);
+  const sample=(await demo.request('/api/samples',{})).state;
+  await assert.rejects(demo.request('/api/projects/archive',{projectId:sample.project.id,expectedRevision:sample.revision}),error=>error.status===403);
+});
+
+test('演示账户只修改本人资料，真实密码和邮箱服务明确不可用且不外发，失败保留资料',async t=>{
+  t.mock.method(globalThis,'fetch',()=>{throw new Error('account must stay local');});
+  const storage=memoryStorage(),demo=createDemoAPI({storage,now:time});
+  const old=await demo.request('/api/account');assert.equal(old.capabilities.mailConfigured,false);assert.equal(old.account.emailVerified,false);
+  const saved=await demo.request('/api/account',{name:'本机自己修改',bio:'不改变真实账号',color:'#765432'},{method:'PATCH'});
+  assert.equal(saved.session.user.name,'本机自己修改');assert.equal(saved.account.bio,'不改变真实账号');assert.equal((await createDemoAPI({storage}).request('/api/account')).account.color,'#765432');
+  const unlinked=await demo.request('/api/people',{name:'未绑定的同名档案'});
+  assert.equal((await demo.request('/api/account',{name:unlinked.person.name},{method:'PATCH'})).account.name,unlinked.person.name,'unbound profile names do not claim an account nickname');
+  const other=(await demo.request('/api/people')).people.find(person=>person.accountLinked&&person.id!==saved.account.personId);
+  if(other)await assert.rejects(demo.request('/api/account',{name:other.name},{method:'PATCH'}),error=>error.code==='NAME_TAKEN');
+  const bytes=storage.values.get(DEMO_STORAGE_KEY);
+  await assert.rejects(demo.request('/api/account',{personId:'other',name:'越界'},{method:'PATCH'}),error=>error.status===400);
+  for(const path of ['/api/account/password','/api/account/email-verification','/api/auth/forgot-password','/api/auth/reset-password','/api/auth/verify-email'])await assert.rejects(demo.request(path,{}),error=>error.status===503);
+  assert.equal(storage.values.get(DEMO_STORAGE_KEY),bytes);
+});

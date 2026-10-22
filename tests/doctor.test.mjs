@@ -77,3 +77,17 @@ test('预检校验代理域名与公开地址，按实际PORT优先级检查端�
   assert.match(precedence.report.checks.find(item => item.name === 'port').message, /4500/);
   assert.equal(run({...base, PORT:'not-a-port'}, true).status, 1);
 });
+
+test('邮件配置预检只核对本地字段，不泄露凭证，缺字段明确报错', () => {
+  const secret='mail-fixture-never-output';
+  const valid=run({COBUILD_PUBLIC_URL:'https://example.test',COBUILD_MAIL_API_KEY:secret,COBUILD_MAIL_FROM:'accounts@example.test'});
+  assert.equal(valid.status,0,valid.stdout);
+  assert.equal(valid.report.checks.find(item=>item.name==='mail').level,'ok');
+  assert.ok(!valid.stdout.includes(secret));
+  for(const config of [{COBUILD_MAIL_API_KEY:secret},{COBUILD_MAIL_FROM:'accounts@example.test'},{COBUILD_MAIL_API_KEY:secret,COBUILD_MAIL_FROM:'accounts@example.test',COBUILD_PUBLIC_URL:'https://example.test',COBUILD_MAIL_API_URL:'http://external.example/send'}]){
+    const invalid=run(config);assert.equal(invalid.status,1,invalid.stdout);
+    assert.equal(invalid.report.checks.find(item=>item.name==='mail').level,'error');
+    assert.ok(!invalid.stdout.includes(secret));
+  }
+  const empty=run({});assert.equal(empty.report.checks.find(item=>item.name==='mail').level,'info');
+});

@@ -56,3 +56,13 @@ test('启动前拒绝非法文件配置或错误域名，不创建数据目录�
     assert.equal(existsSync(data),false);
   }
 });
+
+test('邮件key支持私有文件读取、空值禁用以及单行限制，不改变原环境', t => {
+  const dir=fixture(t), file=join(dir,'mail');
+  writeFileSync(file,'mail-fixture-credential\n');
+  const input={COBUILD_MAIL_API_KEY:'old-value',COBUILD_MAIL_API_KEY_FILE:file};
+  assert.equal(runtimeEnvironment(input).COBUILD_MAIL_API_KEY,'mail-fixture-credential');
+  assert.equal(input.COBUILD_MAIL_API_KEY,'old-value');
+  writeFileSync(file,' \n');assert.equal(runtimeEnvironment(input).COBUILD_MAIL_API_KEY,'');
+  writeFileSync(file,'private-first\nprivate-second');assert.throws(()=>runtimeEnvironment(input),/格式/);
+});

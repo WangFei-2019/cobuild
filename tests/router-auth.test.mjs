@@ -39,3 +39,15 @@ test('authentication return paths reject external destinations and auth loops',(
  assert.equal(safeNextPath('//evil.example','/projects'),'/projects');
  assert.equal(parseRoute(new URL(authHref('register','//evil.example'),'https://cobuild.example')).next,null);
 });
+
+test('验证与恢复邮件使用fragment令牌，认证回跳不会进入恢复循环',()=>{
+ const token='fixture-token-do-not-persist';
+ for(const kind of ['reset-password','verify-email']){
+  const route=parseRoute(new URL('https://cobuild.example/'+kind+'#token='+token));
+  assert.equal(route.kind,kind);assert.equal(route.token,token);
+  assert.equal(safeNextPath('/'+kind+'#token='+token),'/dashboard');
+ }
+ assert.equal(safeNextPath('/forgot-password?email=private@example.test'),'/dashboard');
+ assert.equal(safeNextPath('/account'),'/account');
+ assert.equal(parseRoute(new URL('https://cobuild.example/notifications')).kind,'notifications');
+});

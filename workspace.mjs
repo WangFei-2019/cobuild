@@ -151,7 +151,7 @@ export function createWorkspace(dataDir, { seedDemo = false, operationCommitted 
       && (value.projectIds.length === 0 ? value.defaultProjectId === null : validId(value.defaultProjectId) && value.projectIds.includes(value.defaultProjectId))
       && (value.archivedProjects === undefined || Array.isArray(value.archivedProjects) && value.archivedProjects.every(item => record(item) && validId(item.id) && typeof item.archivedAt === 'string' && Number.isFinite(Date.parse(item.archivedAt)))
         && new Set(value.archivedProjects.map(item => item.id)).size === value.archivedProjects.length && value.archivedProjects.every(item => !value.projectIds.includes(item.id)))
-      && (!originalId || value.projectIds.includes(originalId)));
+      && (!originalId || value.projectIds.includes(originalId) || value.archivedProjects?.some(item=>item.id===originalId)));
   } else {
     index = { schemaVersion: 1, revision: 1, defaultProjectId: originalId, projectIds: originalId ? [originalId] : [] };
     writeJSON(indexPath, index);
@@ -241,6 +241,29 @@ export function createWorkspace(dataDir, { seedDemo = false, operationCommitted 
     return next;
   }
 
+  function storedState(id) {
+    if(!validId(id))throw new AppError('项目标识不正确');
+    const current=states.get(id);if(!current)throw new AppError('没有找到这个项目',404);return current;
+  }
+  function archive(id,expectedRevision) {
+    writable();const current=storedState(id);
+    if(!Number.isSafeInteger(expectedRevision))throw new AppError('请提供归档所依据的项目版本');
+    if(current.revision!==expectedRevision)throw new AppError('项目已有更新，请核对最新内容后再归档',409);
+    const existing=(index.archivedProjects||[]).find(item=>item.id===id);
+    if(existing)return {state:current,archivedAt:existing.archivedAt,alreadyArchived:true};
+    const archivedAt=new Date().toISOString(),projectIds=index.projectIds.filter(value=>value!==id);
+    const nextIndex={...index,revision:index.revision+1,projectIds,defaultProjectId:projectIds.includes(index.defaultProjectId)?index.defaultProjectId:projectIds[0]||null,
+      archivedProjects:[...(index.archivedProjects||[]),{id,archivedAt}]};
+    writeJSON(indexPath,nextIndex);index=nextIndex;return {state:current,archivedAt,alreadyArchived:false};
+  }
+  function restore(id) {
+    writable();const current=storedState(id);
+    if(index.projectIds.includes(id))return {state:current,reused:true,restored:false};
+    const nextIndex={...index,revision:index.revision+1,projectIds:[...index.projectIds,id],defaultProjectId:index.defaultProjectId||id,
+      archivedProjects:(index.archivedProjects||[]).filter(item=>item.id!==id)};
+    writeJSON(indexPath,nextIndex);index=nextIndex;return {state:current,reused:false,restored:true};
+  }
+
   return {
     resolveId, view,
     allStates() { return index.projectIds.map(id => states.get(id)); },
@@ -259,32 +282,25 @@ export function createWorkspace(dataDir, { seedDemo = false, operationCommitted 
       if(options.persist)options.persist(state,effect);else effect.commit();
       return { state, workspace: view() };
     },
+    archiveProject(id, { expectedRevision } = {}) {
+      const current = storedState(id);
+      if (isSampleState(current)) throw new AppError('示例请使用专属移除入口',403);
+      return archive(id,expectedRevision);
+    },
+    restoreProject(id) {
+      if (isSampleState(storedState(id))) throw new AppError('示例请使用专属恢复入口',403);
+      return restore(id);
+    },
     archiveSample(id, { ownerAccountId, expectedRevision } = {}) {
-      writable();
-      const current = states.get(id);
-      if (!current) throw new AppError('没有找到这个项目',404);
+      const current = storedState(id);
       if (!isSampleState(current) || sampleOwner(current) !== ownerAccountId) throw new AppError('只能移除由当前账号创建的示例项目',403);
-      if (!Number.isSafeInteger(expectedRevision)) throw new AppError('请提供移除示例所依据的项目版本');
-      if (current.revision !== expectedRevision) throw new AppError('示例已有更新，请核对最新内容后再移除',409);
-      const existing = (index.archivedProjects || []).find(item => item.id === id);
-      if (existing) return {state:current,archivedAt:existing.archivedAt,alreadyArchived:true};
-      const archivedAt = new Date().toISOString(), projectIds = index.projectIds.filter(value => value !== id);
-      const nextIndex = {...index,revision:index.revision+1,projectIds,defaultProjectId:projectIds.includes(index.defaultProjectId)?index.defaultProjectId:projectIds[0]||null,
-        archivedProjects:[...(index.archivedProjects || []),{id,archivedAt}]};
-      writeJSON(indexPath,nextIndex); index = nextIndex;
-      return {state:current,archivedAt,alreadyArchived:false};
+      return archive(id,expectedRevision);
     },
     restoreSample(id, { ownerAccountId } = {}) {
-      writable();
-      const current = states.get(id);
-      if (!current) throw new AppError('没有找到这个项目',404);
+      const current = storedState(id);
       if (!isSampleState(current) || sampleOwner(current) !== ownerAccountId) throw new AppError('只能恢复由当前账号创建的示例项目',403);
-      if (index.projectIds.includes(id)) return {state:current,reused:true,restored:false};
-      if (index.projectIds.some(projectId => sampleOwner(states.get(projectId)) === ownerAccountId)) throw new AppError('当前账号已有活跃示例，请先移除后再恢复另一份',409);
-      const nextIndex = {...index,revision:index.revision+1,projectIds:[...index.projectIds,id],defaultProjectId:index.defaultProjectId||id,
-        archivedProjects:(index.archivedProjects || []).filter(item=>item.id!==id)};
-      writeJSON(indexPath,nextIndex); index = nextIndex;
-      return {state:current,reused:false,restored:true};
+      if (!index.projectIds.includes(id) && index.projectIds.some(projectId => sampleOwner(states.get(projectId)) === ownerAccountId)) throw new AppError('当前账号已有活跃示例，请先移除后再恢复另一份',409);
+      return restore(id);
     },
     reset(requestedId, { preserveProject = false } = {}) {
       const id = resolveId(requestedId), current = states.get(id);

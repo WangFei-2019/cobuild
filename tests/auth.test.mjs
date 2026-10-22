@@ -70,7 +70,7 @@ test('默认鉴权、真实管理员身份、持久哈希会话、退出和会�
   assert.notEqual(state.currentMemberId,'m0');
   assert.equal(state.members.find(member => member.id===state.currentMemberId).name,'真实管理员');
   assert.deepEqual(state.tasks,seedState().tasks);
-  assert.deepEqual(state.permissions,{manageProject:true,createTask:true,readOnly:false});
+  assert.deepEqual(state.permissions,{manageProject:true,createTask:true,readOnly:false,canArchive:true});
   assert.equal(state.members.find(member => member.id==='m0').accountLinked,false);
   const unchanged = JSON.parse(readFileSync(join(dataDir,'project.json'),'utf8'));
   assert.equal((await admin.post('/api/action',{type:'accept',taskId:'t6'})).status,403);
@@ -168,7 +168,7 @@ test('邀请邮箱、撤销、到期和只读角色均由服务器执行；同�
   assert.equal(resolved.project.id,'p1'); assert.equal(resolved.person.name,'林夏'); assert.equal(resolved.person.accountLinked,false);
   assert.equal((await viewer.post('/api/auth/register',{name:'林夏',email:'wrong@example.com',password:PASSWORD,inviteToken:token})).status,403);
   assert.equal((await viewer.post('/api/auth/register',{name:'林夏',email:'viewer@example.com',password:PASSWORD,inviteToken:token})).status,200);
-  assert.deepEqual((await viewer.json('/api/state')).permissions,{manageProject:false,createTask:false,readOnly:true});
+  assert.deepEqual((await viewer.json('/api/state')).permissions,{manageProject:false,createTask:false,readOnly:true,canArchive:false});
   assert.equal((await viewer.post('/api/action',{type:'addUpdate',taskId:'t1',text:'即使原负责人也不能越过只读角色'})).status,403);
   assert.equal((await viewer.post('/api/invitations',{projectId:'p1'})).status,403);
   const revoked = (await (await admin.post('/api/invitations',{projectId:'p1',email:'revoked@example.com'})).json()).invitation;

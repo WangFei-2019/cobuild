@@ -107,7 +107,7 @@ test('A/B独立注册各建私有项目，账号和项目权限隔离，接受�
   assert.equal((await a.request('/api/invitations/accept', { token })).status, 409);
   const accepted = await b.request('/api/invitations/accept', { token });
   assert.equal(accepted.status, 200); assert.equal(accepted.data.session.user.personId, b.user.personId);
-  assert.deepEqual(accepted.data.state.permissions, { manageProject: false, createTask: false, readOnly: true });
+  assert.deepEqual(accepted.data.state.permissions, { manageProject: false, createTask: false, readOnly: true, canArchive: false });
   assert.equal((await b.request('/api/action', { projectId: pa.project.id, type: 'addMember', name: '只读不可新增' })).status, 403);
   assert.equal((await b.request(`/api/state?projectId=${pb.project.id}`)).data.permissions.manageProject, true);
   assert.equal((await a.request(`/api/state?projectId=${pb.project.id}`)).status, 403);

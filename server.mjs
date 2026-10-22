@@ -6,8 +6,11 @@ import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { applyAction, analyzeUpdate, projectReport, AppError } from './domain.mjs';
 import { createWorkspace } from './workspace.mjs';
 import { createIdentity } from './identity.mjs';
+import { createMailer, mailUnavailable } from './mail.mjs';
 import { peopleSummary, personDetails, projectWithProfiles } from './people.mjs';
 import { dashboardSummary } from './dashboard.mjs';
+import {deriveNotifications} from './notifications.mjs';
+import {createNotificationStore} from './notification-store.mjs';
 import { buildSampleState, sampleProjectInput, markSampleState, isSampleState, sampleOwner, sampleInfo } from './sample.mjs';
 import { aiStatus, generatePlan, applyPlanDraft, applyMilestoneAction, reconcileMilestones, generateReplan, previewReplan, applyReplanDraft } from './planning.mjs';
 
@@ -15,7 +18,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const TYPES = {'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.md':'text/plain; charset=utf-8','.json':'application/json; charset=utf-8','.png':'image/png'};
 const COOKIE = 'cobuild_session';
 const localHost = /^(?:localhost|127\.0\.0\.1|\[::1\]|(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.[\d.]+)(?::\d+)?$/;
-const pagePath = /^\/(?:dashboard|projects(?:\/[A-Za-z0-9_-]+\/(?:overview|tasks|mine|members|milestones|deliverables|insights|activity|settings))?|people(?:\/[A-Za-z0-9_-]+)?|settings|login|register|setup|invite\/[A-Za-z0-9_-]{43})\/?$/;
+const pagePath = /^\/(?:dashboard|projects(?:\/[A-Za-z0-9_-]+\/(?:overview|tasks|mine|members|milestones|deliverables|insights|activity|settings))?|people(?:\/[A-Za-z0-9_-]+)?|account|notifications|settings|login|register|forgot-password|reset-password|verify-email|setup|invite\/[A-Za-z0-9_-]{43})\/?$/;
 const validRole = value => { const role = value ?? 'member'; if (!['admin','member','viewer'].includes(role)) throw new AppError('项目访问角色不正确'); return role; };
 const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const loopbackHost = hostname => ['localhost','[::1]','::1'].includes(hostname) || /^127(?:\.\d{1,3}){3}$/.test(hostname);
@@ -74,6 +77,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
   const deployment = deploymentURL(publicUrl);
   const secureCookie = deployment?.protocol === 'https:';
   const remoteDeployment = deployment && !loopbackHost(deployment.hostname);
+  const mailer=createMailer({publicUrl:deployment?.origin||''});
   let workspace, identity;
   function virtualSamplePerson(personId) {
     return Boolean(identity?.memberships(personId).some(link => {
@@ -88,13 +92,16 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
   // Recover any interrupted cross-store operation before project JSON is read
   // or syncProject can treat an orphan member as an unbound legacy profile.
   try { workspace = createWorkspace(dataDir, { seedDemo, operationCommitted:identity ? id=>identity.operationCommitted(id) : undefined }); }
-  catch(error) { identity?.close(); throw error; }
-  const aiRequests = aiLimiter();
-  if (identity) for (const state of workspace.allStoredStates()) {
-    const owner = isSampleState(state) ? identity.user(sampleOwner(state)) : null;
-    if (isSampleState(state) && !owner) throw new Error('示例创建账号已不存在，请检查身份数据库');
-    identity.syncProject(state, owner ? new Map([['m0',{personId:owner.personId,accessRole:'admin'}]]) : undefined);
-  }
+  catch(error) { mailer.close();identity?.close(); throw error; }
+  let notifications,aiRequests;
+  try {
+    notifications=identity?createNotificationStore(dataDir):null;aiRequests=aiLimiter();
+    if (identity) for (const state of workspace.allStoredStates()) {
+      const owner = isSampleState(state) ? identity.user(sampleOwner(state)) : null;
+      if (isSampleState(state) && !owner) throw new Error('示例创建账号已不存在，请检查身份数据库');
+      identity.syncProject(state, owner ? new Map([['m0',{personId:owner.personId,accessRole:'admin'}]]) : undefined);
+    }
+  }catch(error){mailer.close();notifications?.close();identity?.close();throw error;}
   const revision = () => workspace.view().revision + (identity?.revision() || 0);
 
   function send(res, status, value, type = 'application/json; charset=utf-8', extra = {}) {
@@ -112,7 +119,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
     if (!plainObject(input)) throw new AppError('请求格式不正确');
     return input;
   }
-  const sessionView = user => ({ setupRequired:identity?.setupRequired() || false, setupTokenRequired:Boolean(identity?.setupRequired() && (remoteDeployment || setupToken)), registrationEnabled:Boolean(identity && !identity.setupRequired()), user, onboarding:user && identity ? identity.onboarding(user.id) : null });
+  const sessionView = user => ({ setupRequired:identity?.setupRequired() || false, setupTokenRequired:Boolean(identity?.setupRequired() && (remoteDeployment || setupToken)), registrationEnabled:Boolean(identity && !identity.setupRequired()), user, onboarding:user && identity ? identity.onboarding(user.id) : null,capabilities:{mailConfigured:Boolean(identity&&mailer.status().configured)} });
   const sessionCookie = (token, expired = false) => `${COOKIE}=${expired ? '' : token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${expired ? 0 : 604800}${secureCookie ? '; Secure' : ''}`;
   function cookieToken(req) {
     return (req.headers.cookie || '').split(';').map(value => value.trim()).find(value => value.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1) || '';
@@ -128,7 +135,7 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
     const sample = isSampleState(state);
     const manageProject = sample ? sampleOwner(state) === user.id : user.workspaceRole === 'admin' || membership?.accessRole === 'admin';
     const write = manageProject || membership?.accessRole === 'member';
-    return { manageProject, createTask:Boolean(write), readOnly:!write, ...(sample ? {manageMembers:false} : {}) };
+    return { manageProject, createTask:Boolean(write), readOnly:!write, canArchive:!sample&&manageProject, ...(sample ? {manageMembers:false} : {}) };
   }
   function decoratedState(state, user) {
     if (!authRequired) return state;
@@ -144,8 +151,11 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
     value.projects = value.projects.map(project => { const named = projectWithProfiles(workspace.state(project.id),identity); return { ...project,
       ownerName:named.members.find(member=>member.id==='m0')?.name || '', sample:sampleInfo(named,user.id), permissions:permissions(named,user), members:named.members.map(member => ({...member,...identity.member(project.id,member.id)})) }; });
     value.archivedSamples = workspace.archivedEntries().filter(({state})=>sampleOwner(state)===user.id).map(({state,archivedAt})=>archivedSample(state,archivedAt));
+    value.archivedProjects=workspace.archivedEntries().filter(({state})=>!isSampleState(state)&&canRead(state,user)).map(({state,archivedAt})=>archivedProject(state,archivedAt,user));
     return value;
   }
+  function archivedProject(state,archivedAt,user){return {id:state.project.id,name:state.project.name,color:state.project.color||'#427b68',revision:state.revision,archivedAt,canRestore:permissions(state,user).manageProject};}
+  function inbox(user){return deriveNotifications(identity,visibleStates(user),user,{invitations:identity.notificationInvitations?.(user.id)||[]});}
   function access(requestedId, user, { manage = false, write = false } = {}) {
     const state = workspace.state(requestedId);
     if (!authRequired) return { state, projectId:state.project.id, actorId:null, permissions:{manageProject:true,createTask:true,readOnly:false} };
@@ -274,6 +284,25 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       let currentUser = identity?.sessionUser(token) || null;
       if (req.method === 'GET' && pathname === '/api/health') return send(res,200,authRequired ? {ok:true,app:'cobuild',authRequired:true} : {ok:true,app:'cobuild',mode:'local-rules',revision:workspace.state(queryProjectId()).revision,workspaceRevision:revision()});
       if (req.method === 'GET' && pathname === '/api/auth/session') return send(res,200,sessionView(currentUser));
+      if (['/api/account','/api/account/password','/api/account/email-verification'].includes(pathname)) {
+        if(!identity||!currentUser)throw new AppError('请先登录工作区',401);
+        const accountResponse=()=>({account:identity.account(currentUser.id),capabilities:{mailConfigured:mailer.status().configured}});
+        if(pathname==='/api/account'&&req.method==='GET')return send(res,200,accountResponse());
+        if(pathname==='/api/account'&&req.method==='PATCH') {
+          const input=await body(req,16*1024);identity.updateAccount(currentUser.id,input);
+          return send(res,200,{...accountResponse(),session:sessionView(identity.user(currentUser.id))});
+        }
+        if(req.method==='POST'&&pathname==='/api/account/password') {
+          const result=await identity.changePassword(currentUser.id,await body(req,16*1024),req.socket.remoteAddress||'unknown');
+          return send(res,200,{...result,session:sessionView(null)},undefined,{'Set-Cookie':sessionCookie('',true)});
+        }
+        if(req.method==='POST'&&pathname==='/api/account/email-verification') {
+          const input=await body(req,16*1024);if(Object.keys(input).length)throw new AppError('邮箱验证仅支持当前账号，无需指定邮箱或身份');
+          if(!identity.account(currentUser.id).emailVerified&&!mailer.status().configured)throw mailUnavailable();
+          return send(res,200,await identity.requestEmailVerification(currentUser.id,req.socket.remoteAddress||'unknown',request=>mailer.send(request)));
+        }
+        throw new AppError('不支持的请求方式',405);
+      }
       if (req.method === 'POST' && pathname.startsWith('/api/auth/')) {
         if (!identity) throw new AppError('测试兼容模式不提供账号接口',404);
         if (pathname === '/api/auth/onboarding' && !currentUser) throw new AppError('请先登录工作区',401);
@@ -282,6 +311,19 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
         if (pathname === '/api/auth/onboarding') {
           if (Object.keys(input).length !== 1 || !Object.hasOwn(input,'status')) throw new AppError('指引设置仅支持当前账号的status字段');
           return send(res,200,{onboarding:identity.updateOnboarding(currentUser.id,input.status)});
+        }
+        if(pathname==='/api/auth/forgot-password') {
+          if(Object.keys(input).some(key=>key!=='email')||typeof input.email!=='string')throw new AppError('密码恢复仅支持邮箱字段');
+          if(!mailer.status().configured)throw mailUnavailable();
+          return send(res,202,identity.requestPasswordReset(input,req.socket.remoteAddress||'unknown',request=>mailer.send(request)));
+        }
+        if(pathname==='/api/auth/reset-password') {
+          const result=await identity.resetPassword(input,req.socket.remoteAddress||'unknown');
+          return send(res,200,{...result,session:sessionView(null)},undefined,{'Set-Cookie':sessionCookie('',true)});
+        }
+        if(pathname==='/api/auth/verify-email') {
+          const result=identity.verifyEmail(input,req.socket.remoteAddress||'unknown');
+          return send(res,200,{...result,session:sessionView(identity.sessionUser(token))});
         }
         let result;
         if (pathname === '/api/auth/setup') {
@@ -333,6 +375,24 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
         return send(res,201,sampleResult(result.state,currentUser));
       }
       if (req.method === 'GET' && pathname === '/api/workspace') return send(res,200,workspaceView(currentUser));
+      if(req.method==='GET'&&pathname==='/api/notifications'){
+        if(!notifications)throw new AppError('站内通知需要登录账号',403);
+        return send(res,200,notifications.view(currentUser.id,inbox(currentUser)));
+      }
+      if(req.method==='POST'&&pathname==='/api/notifications/read'){
+        if(!notifications)throw new AppError('站内通知需要登录账号',403);
+        return send(res,200,notifications.mark(currentUser.id,await body(req,64*1024),inbox(currentUser)));
+      }
+      if(req.method==='POST'&&['/api/projects/archive','/api/projects/restore'].includes(pathname)){
+        if(!identity)throw new AppError('项目归档需要登录账号',403);
+        const input=await body(req,16*1024),archive=pathname.endsWith('/archive'),keys=archive?['projectId','expectedRevision']:['projectId'];
+        if(Object.keys(input).length!==keys.length||Object.keys(input).some(key=>!keys.includes(key)))throw new AppError('项目归档请求字段不正确');
+        const state=workspace.storedState(input.projectId);
+        if(!canRead(state,currentUser)||!permissions(state,currentUser).manageProject)throw new AppError('请由项目管理者归档或恢复项目',403);
+        if(isSampleState(state))throw new AppError('示例请使用专属移除与恢复入口',403);
+        if(archive){const result=workspace.archiveProject(input.projectId,{expectedRevision:input.expectedRevision});return send(res,200,{workspace:workspaceView(currentUser),archivedProject:archivedProject(result.state,result.archivedAt,currentUser),alreadyArchived:result.alreadyArchived});}
+        const result=workspace.restoreProject(input.projectId);return send(res,200,{state:decoratedState(result.state,currentUser),workspace:workspaceView(currentUser),reused:result.reused,restored:result.restored});
+      }
       if (req.method === 'GET' && pathname === '/api/dashboard') {
         const queries = url.searchParams.getAll('q');
         if (queries.length > 1) throw new AppError('请只指定一个搜索内容');
@@ -483,9 +543,9 @@ export function createApp({ dataDir = process.env.COBUILD_DATA_DIR || join(ROOT,
       const publicDir = resolve(ROOT,'public'), file = resolve(publicDir,relative);
       if (!file.startsWith(`${publicDir}/`) || !existsSync(file) || !statSync(file).isFile()) throw new AppError('页面或文件不存在',404);
       send(res,200,req.method === 'HEAD' ? '' : readFileSync(file),TYPES[extname(file)] || 'application/octet-stream',{'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});
-    } catch (error) { send(res,error.status || 500,{error:error.status ? error.message : '服务处理失败，请查看服务日志',...(['DUPLICATE_PERSON_NAME','EMAIL_TAKEN','NAME_TAKEN'].includes(error.code)?{code:error.code}:{}),...(['email','name'].includes(error.field)?{field:error.field}:{})},undefined,error.retryAfter ? {'Retry-After':String(error.retryAfter)} : {}); if (!error.status) process.stderr.write(`${error.stack}\n`); }
+    } catch (error) { send(res,error.status || 500,{error:error.status ? error.message : '服务处理失败，请查看服务日志',...(['DUPLICATE_PERSON_NAME','EMAIL_TAKEN','NAME_TAKEN','MAIL_NOT_CONFIGURED','MAIL_DELIVERY_FAILED','TOKEN_INVALID','CURRENT_PASSWORD_INVALID','CREDENTIALS_CHANGED'].includes(error.code)?{code:error.code}:{}),...(['email','name','currentPassword'].includes(error.field)?{field:error.field}:{})},undefined,error.retryAfter ? {'Retry-After':String(error.retryAfter)} : {}); if (!error.status) process.stderr.write(`${error.stack}\n`); }
   });
-  server.on('close',() => identity?.close());
+  server.on('close',() => {mailer.close();identity?.close();notifications?.close();});
   return server;
 }
 
